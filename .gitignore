@@ -1,0 +1,39 @@
+# Секреты и конфигурации с ключами
+secrets.json
+config_local.yaml
+.env
+
+# Логи и данные
+logs/
+data/
+*.log
+platform_run.log
+
+# Системные файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

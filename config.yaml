@@ -1,0 +1,43 @@
+# Конфигурация платформы PLATO V2
+
+bybit:
+
+  use_testnet: false
+  use_demo: true
+  
+  # URL выбирается автоматически на основе флагов выше
+  # testnet: https://api-testnet.bybit.com
+  # demo: https://api-demo.bybit.com
+  # mainnet: https://api.bybit.com
+
+trading:
+  symbol: "SOLUSDT"
+  category: "linear"
+  
+  risk:
+    base_risk_usdt: 30.0
+    max_position_size: 10.0
+    max_daily_loss: 100.0
+  
+  orders:
+    tp1_percent: 0.5
+    tp2_percent: 1.0
+    sl_percent: 0.3
+    breakeven_after_tp1: true
+    planned_size: 7.0  # ← ДОБАВИТЬ
+
+self_test:
+  enabled: true
+  interval_seconds: 120
+  test_order_qty: 7.0  # ← ИЗМЕНИТЬ с 0.1 на 7.0
+  test_order_price_offset_percent: 10.0
+
+logging:
+  level: "INFO"
+  file: "plato.log"
+
+system:
+  startup_test: "none"
+  test_trades_count: 10
+  signal_source: "random"    # "random" = тестовый генератор, "off" = только сбор данных
+  shadow_mode: false      # true = теневой режим, false = боевой

@@ -1,0 +1,62 @@
+# Получаем все паспорта и преобразуем из JSON
+$passports = Get-ChildItem data\passports\*.json | ForEach-Object { Get-Content $_.FullName | ConvertFrom-Json }
+
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "  ПОЛНЫЙ АНАЛИЗ ВСЕХ ПАСПОРТОВ ПЛАТФОРМЫ" -ForegroundColor Cyan
+Write-Host "==================================================" -ForegroundColor Cyan
+
+$total = $passports.Count
+Write-Host "`n📁 Всего паспортов: $total" -ForegroundColor White
+
+if ($total -gt 0) {
+    # 1. Группировка по статусам
+    Write-Host "`n📊 РАСПРЕДЕЛЕНИЕ ПО СТАТУСАМ:" -ForegroundColor Yellow
+    $passports | Group-Object status | Select-Object Name, Count | Sort-Object Count -Descending | Format-Table @{Label="Статус"; Expression={$_.Name}}, @{Label="Кол-во"; Expression={$_.Count}} -AutoSize
+
+    # 2. Анализ закрытых сделок
+    $closed = $passports | Where-Object { $_.status -eq 'CLOSED' }
+    
+    if ($closed.Count -gt 0) {
+        Write-Host "🚪 ПРИЧИНЫ ЗАКРЫТИЯ (только статус CLOSED):" -ForegroundColor Yellow
+        $closed | Group-Object exit_reason | Select-Object Name, Count | Sort-Object Count -Descending | Format-Table @{Label="Причина"; Expression={$_.Name}}, @{Label="Кол-во"; Expression={$_.Count}} -AutoSize
+
+        # 3. Финансы
+        $totalGross = ($passports | Measure-Object gross_pnl -Sum).Sum
+        $totalComm = ($passports | Measure-Object commission -Sum).Sum
+        $totalNet = ($passports | Measure-Object net_pnl -Sum).Sum
+
+        Write-Host "💰 ФИНАНСОВЫЙ ИТОГ:" -ForegroundColor Yellow
+        Write-Host "  Общий Gross P&L : $([math]::Round($totalGross, 2)) USDT" -ForegroundColor White
+        Write-Host "  Общие комиссии  : -$([math]::Round($totalComm, 2)) USDT" -ForegroundColor Red
+        $netColor = if ($totalNet -ge 0) { "Green" } else { "Red" }
+        Write-Host "  ИТОГО Net P&L   : $([math]::Round($totalNet, 2)) USDT" -ForegroundColor $netColor
+
+        # 4. Эффективность
+        $wins = ($closed | Where-Object { $_.net_pnl -gt 0 }).Count
+        $losses = ($closed | Where-Object { $_.net_pnl -lt 0 }).Count
+        $breakeven = ($closed | Where-Object { $_.net_pnl -eq 0 }).Count
+
+        Write-Host "`n🎯 ЭФФЕКТИВНОСТЬ (закрытые сделки):" -ForegroundColor Yellow
+        Write-Host "  Прибыльных (Win) : $wins" -ForegroundColor Green
+        Write-Host "  Убыточных (Loss) : $losses" -ForegroundColor Red
+        Write-Host "  В ноль (BE)      : $breakeven" -ForegroundColor Gray
+        
+        $totalClosed = $wins + $losses + $breakeven
+        if ($totalClosed -gt 0) {
+            $winRate = [math]::Round(($wins / $totalClosed) * 100, 1)
+            Write-Host "  Win Rate         : $winRate %" -ForegroundColor Cyan
+        }
+    } else {
+        Write-Host "`n⏳ Закрытых сделок (CLOSED) пока нет. Платформа только набирает статистику." -ForegroundColor Gray
+    }
+
+    # 5. Предупреждения
+    $warnings = ($passports | Where-Object { $_.timeline.event -match "WARNING|ERROR" }).Count
+    if ($warnings -gt 0) {
+        Write-Host "`n⚠️ Паспортов с предупреждениями или ошибками: $warnings" -ForegroundColor Magenta
+    }
+} else {
+    Write-Host "`n❌ Паспорта не найдены в папке data\passports\" -ForegroundColor Red
+}
+
+Write-Host "==================================================" -ForegroundColor Cyan
