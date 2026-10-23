@@ -243,28 +243,60 @@ class AdaptiveZoneV1:
             self._save_zones()
 
     def _check_departure(self, zone: AnomalyZone, current_price: float):
-        """Проверка отхода цены от зоны."""
-        if zone.side == "LONG":
-            departure_down = ((zone.price - current_price) / zone.price) * 100
-            if departure_down >= self.min_departure_pct:
-                if departure_down > self.max_departure_pct:
-                    zone.state = "INVALIDATED"
-                    autopsy_logger.info(json.dumps({"event": "ZONE_INVALIDATED", "zone_id": zone.id, "reason": "deep_departure"}))
-                else:
-                    zone.state = "DEPARTED"
+        """Проверка отхода цены от зоны + ОБНОВЛЕНИЕ ЭКСТРЕМУМОВ ОТКАТА."""
+        atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
+        min_departure_abs = 1.5 * atr_5m
+        max_departure_abs = zone.price * (self.max_departure_pct / 100.0)
+        
+        # ✅ КРИТИЧЕСКИ ВАЖНО: Обновляем экстремумы КАЖДЫЙ ТИК, пока зона активна
+        if zone.state == "DEPARTED":
+            if zone.side == "LONG":
+                if zone.min_price_after is None or current_price < zone.min_price_after:
                     zone.min_price_after = current_price
-                    autopsy_logger.info(json.dumps({"event": "ZONE_DEPARTED", "zone_id": zone.id, "min_price": current_price, "side": "LONG"}))
-                self._save_zones()
-        else:  # SHORT
-            departure_up = ((current_price - zone.price) / zone.price) * 100
-            if departure_up >= self.min_departure_pct:
-                if departure_up > self.max_departure_pct:
-                    zone.state = "INVALIDATED"
-                    autopsy_logger.info(json.dumps({"event": "ZONE_INVALIDATED", "zone_id": zone.id, "reason": "deep_departure"}))
-                else:
-                    zone.state = "DEPARTED"
+            else:  # SHORT
+                if zone.max_price_after is None or current_price > zone.max_price_after:
                     zone.max_price_after = current_price
-                    autopsy_logger.info(json.dumps({"event": "ZONE_DEPARTED", "zone_id": zone.id, "max_price": current_price, "side": "SHORT"}))
+
+        if zone.side == "LONG":
+            departure_down_abs = zone.price - current_price
+            if departure_down_abs >= min_departure_abs:
+                if departure_down_abs > max_departure_abs:
+                    zone.state = "INVALIDATED"
+                    autopsy_logger.info(json.dumps({
+                        "event": "ZONE_INVALIDATED", "zone_id": zone.id, 
+                        "reason": "deep_departure", "departure_abs": round(departure_down_abs, 4), 
+                        "max_allowed": round(max_departure_abs, 4)
+                    }))
+                else:
+                    if zone.state != "DEPARTED": # Фиксируем переход только один раз
+                        zone.state = "DEPARTED"
+                        zone.min_price_after = current_price # Инициализация при переходе
+                    autopsy_logger.info(json.dumps({
+                        "event": "ZONE_DEPARTED", "zone_id": zone.id, 
+                        "min_price": current_price, "side": "LONG",
+                        "departure_abs": round(departure_down_abs, 4), "atr_5m_used": round(atr_5m, 4)
+                    }))
+                self._save_zones()
+                
+        else:  # SHORT
+            departure_up_abs = current_price - zone.price
+            if departure_up_abs >= min_departure_abs:
+                if departure_up_abs > max_departure_abs:
+                    zone.state = "INVALIDATED"
+                    autopsy_logger.info(json.dumps({
+                        "event": "ZONE_INVALIDATED", "zone_id": zone.id, 
+                        "reason": "deep_departure", "departure_abs": round(departure_up_abs, 4),
+                        "max_allowed": round(max_departure_abs, 4)
+                    }))
+                else:
+                    if zone.state != "DEPARTED":
+                        zone.state = "DEPARTED"
+                        zone.max_price_after = current_price
+                    autopsy_logger.info(json.dumps({
+                        "event": "ZONE_DEPARTED", "zone_id": zone.id, 
+                        "max_price": current_price, "side": "SHORT",
+                        "departure_abs": round(departure_up_abs, 4), "atr_5m_used": round(atr_5m, 4)
+                    }))
                 self._save_zones()
 
     async def _check_return_and_entry(self, zone: AnomalyZone, current_price: float,
@@ -275,8 +307,7 @@ class AdaptiveZoneV1:
 
         # 2. Сумма дельты за буфер
         zone_delta_sum = sum(c.get("delta", 0.0) for c in zone.candles_buffer)
-        atr = self.current_snapshot.get("atr", 0.5) if self.current_snapshot else 0.5
-
+        
         # 3. ✅ ПРОВЕРКА СПРЕДА СПОТ/ФЬЮЧЕРС
         futures_price = await self._get_futures_price("SOLUSDT")
         spread_pct = 0.0
@@ -299,38 +330,84 @@ class AdaptiveZoneV1:
                 }))
                 return None
 
-        # 4. Параметры риск-менеджмента
-        sl_multiplier = 1.7
-        tp1_rr = 1.5
-        tp2_rr = 3.0
-        be_buffer_pct = 0.001
+        # === ПЕРЕКЛЮЧАТЕЛЬ ЛОГИКИ ВЫХОДА ===
+        exit_mode = getattr(self, 'exit_logic', 'atr') 
+        
+        if exit_mode == "structure":
+            # ✅ РЕЖИМ СТРУКТУРЫ: Привязка к размеру отката
+            if zone.side == "LONG":
+                dep_val = abs(zone.price - (zone.min_price_after or zone.price))
+                sl_price = (zone.min_price_after or zone.price) * 0.998
+                tp1_price = current_price + (dep_val * 0.5)
+                tp2_price = current_price + (dep_val * 1.0)
+                be_price = None
+                sl_reason = f"Structure: SL за минимумом отката (Dep={dep_val:.3f})"
+            else:  # SHORT
+                dep_val = abs((zone.max_price_after or zone.price) - zone.price)
+                sl_price = (zone.max_price_after or zone.price) * 1.002
+                tp1_price = current_price - (dep_val * 0.5)
+                tp2_price = current_price - (dep_val * 1.0)
+                be_price = None
+                sl_reason = f"Structure: SL за максимумом отката (Dep={dep_val:.3f})"
+        else:
+            # ✅ LIVE-РЕЖИМ (ATR-based): Универсальный скальпинг
+            atr = self.current_snapshot.get("atr", 0.5) if self.current_snapshot else 0.5
+            sl_distance = atr * 1.7
+            
+            if zone.side == "LONG":
+                sl_price = current_price - sl_distance
+                tp1_price = current_price + (sl_distance * 1.5)
+                tp2_price = current_price + (sl_distance * 3.0)
+                be_price = current_price * 1.001
+            else:
+                sl_price = current_price + sl_distance
+                tp1_price = current_price - (sl_distance * 1.5)
+                tp2_price = current_price - (sl_distance * 3.0)
+                be_price = current_price * 0.999
+                
+            sl_reason = f"ATR(1m)-based: SL dist={sl_distance:.3f} (1.7x)"
 
-        risk_distance = atr * sl_multiplier
-
-        # 5. Расчет уровней
+        # === ФИЛЬТР ДЕЛЬТЫ ===
         if zone.side == "LONG":
             if zone_delta_sum >= thresholds.delta_threshold_long:
                 return None
-            sl_price = current_price - risk_distance
-            tp1_price = current_price + (risk_distance * tp1_rr)
-            tp2_price = current_price + (risk_distance * tp2_rr)
-            be_price = current_price * (1.0 + be_buffer_pct)
         else:  # SHORT
             if zone_delta_sum <= thresholds.delta_threshold_short:
                 return None
-            sl_price = current_price + risk_distance
-            tp1_price = current_price - (risk_distance * tp1_rr)
-            tp2_price = current_price - (risk_distance * tp2_rr)
-            be_price = current_price * (1.0 - be_buffer_pct)
+
+        # === ДИНАМИЧЕСКИЙ САЙЗИНГ (Безопасный хардкод до интеграции конфига) ===
+        TARGET_RISK_USDT = 30.0      # Целевой риск на сделку ($)
+        MAX_POSITION_SIZE = 10.0     # Максимальный объем (SOL)
+        MIN_POSITION_SIZE = 0.1      # Минимальный объем (SOL)
+        
+        sl_dist_usd = abs(current_price - sl_price)
+        
+        # Рассчитываем безопасный объем под фиксированный риск
+        if sl_dist_usd > 0:
+            safe_qty = TARGET_RISK_USDT / sl_dist_usd
+        else:
+            safe_qty = MAX_POSITION_SIZE
+            
+        # Применяем ограничения min/max
+        final_qty = max(MIN_POSITION_SIZE, min(safe_qty, MAX_POSITION_SIZE))
+        
+        actual_risk_usdt = round(sl_dist_usd * final_qty, 2)
 
         delta_formatted = round(zone_delta_sum, 2)
+
+        autopsy_logger.info(json.dumps({
+            "event": "EXIT_LOGIC_APPLIED", "zone_id": zone.id, 
+            "mode": exit_mode, "sl_price": round(sl_price, 4), 
+            "tp1": round(tp1_price, 4), "tp2": round(tp2_price, 4),
+            "risk_usd": actual_risk_usdt, "qty": final_qty
+        }))
 
         autopsy_logger.info(json.dumps({
             "event": "SIGNAL_GENERATED", "zone_id": zone.id, "side": zone.side,
             "spot_price": current_price, "futures_price": futures_price,
             "entry": current_price, "sl": sl_price, "tp1": tp1_price, "tp2": tp2_price, "be": be_price,
-            "delta_sum": delta_formatted, "atr": round(atr, 3),
-            "spread_pct": round(spread_pct, 4)
+            "delta_sum": delta_formatted, "spread_pct": round(spread_pct, 4),
+            "exit_mode": exit_mode, "actual_risk_usdt": actual_risk_usdt, "final_qty": final_qty
         }))
 
         zone.state = "ACTIVE_TRADE"
@@ -345,10 +422,10 @@ class AdaptiveZoneV1:
             "tp1_price": tp1_price,
             "tp2_price": tp2_price,
             "be_price": be_price,
-            "quantity": 7.0,
+            "quantity": final_qty,
             "confidence": 0.85,
             "strategy": "AdaptiveZoneV1",
-            "comment": f"Adaptive Zone (Δ: {delta_formatted}, ATR: {round(atr, 3)}, Spread: {spread_pct:.3f}%)"
+            "comment": f"Adaptive Zone (Δ: {delta_formatted}, Exit: {exit_mode}, Risk: ${actual_risk_usdt})"
         }
 
     async def _execute_signal(self, signal: Dict[str, Any], zone: AnomalyZone):

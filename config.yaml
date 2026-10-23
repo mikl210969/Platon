@@ -1,7 +1,6 @@
 # Конфигурация платформы PLATO V2
 
 bybit:
-
   use_testnet: false
   use_demo: true
   
@@ -14,9 +13,14 @@ trading:
   symbol: "SOLUSDT"
   category: "linear"
   
+  # 🔑 КЛЮЧЕВОЙ ПЕРЕКЛЮЧАТЕЛЬ ЛОГИКИ ВЫХОДА
+  # "atr" = текущий live-режим (ATR-based)
+  # "structure" = режим бэктеста (+36%, Structure-based)
+  exit_logic: "structure" 
+  
   risk:
-    base_risk_usdt: 30.0
-    max_position_size: 10.0
+    base_risk_usdt: 30.0       # Целевой риск на сделку ($)
+    max_position_size: 10.0    # Максимальный объем (SOL)
     max_daily_loss: 100.0
   
   orders:
@@ -24,12 +28,12 @@ trading:
     tp2_percent: 1.0
     sl_percent: 0.3
     breakeven_after_tp1: true
-    planned_size: 7.0  # ← ДОБАВИТЬ
+    planned_size: 7.0
 
 self_test:
   enabled: true
   interval_seconds: 120
-  test_order_qty: 7.0  # ← ИЗМЕНИТЬ с 0.1 на 7.0
+  test_order_qty: 7.0
   test_order_price_offset_percent: 10.0
 
 logging:
@@ -39,5 +43,5 @@ logging:
 system:
   startup_test: "none"
   test_trades_count: 10
-  signal_source: "random"    # "random" = тестовый генератор, "off" = только сбор данных
+  signal_source: "off"    # "random" = тестовый генератор, "off" = только сбор данных
   shadow_mode: false      # true = теневой режим, false = боевой

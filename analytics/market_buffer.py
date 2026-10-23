@@ -1,6 +1,7 @@
 """
 Аналитический агрегатор рыночных данных.
 Собирает стакан, трейды, свечи → выдаёт снапшот Features раз в секунду.
+V2: Добавлен независимый расчет ATR(14) по 5-минутным свечам.
 """
 
 import asyncio
@@ -91,7 +92,7 @@ class DeltaCalculator:
 
 
 class ATRCalculator:
-    """ATR(14) на 1-минутных свечах."""
+    """ATR(14) на свечах (универсальный для любого таймфрейма)."""
     def __init__(self, period: int = 14):
         self.period = period
         self.candles: List[Dict[str, float]] = []
@@ -109,7 +110,7 @@ class ATRCalculator:
         if len(self.candles) > self.period * 2:
             self.candles = self.candles[-self.period * 2:]
     
-    def update_kline_1m(self, kline: Dict[str, Any]):
+    def update_kline(self, kline: Dict[str, Any]):
         confirm = kline.get("confirm", True)
         if confirm is False or confirm == "false":
             return
@@ -198,6 +199,7 @@ class MarketBuffer:
         self.orderbook = OrderbookAnalyzer(min_wall_size=100.0)
         self.delta = DeltaCalculator()
         self.atr = ATRCalculator(period=14)
+        self.atr_5m = ATRCalculator(period=14)  # ✅ V2: Отдельный калькулятор для 5m
         self.volume_profile = VolumeProfile(bucket_size=0.1, max_age_seconds=3600 * 4)
         self.current_price: float = 0.0
         
@@ -211,13 +213,23 @@ class MarketBuffer:
     async def bootstrap_atr(self, rest, category: str, symbol: str):
         """✅ ЕДИНСТВЕННЫЙ REST-ЗАПРОС ДЛЯ РЫНКА: загрузка истории при старте."""
         try:
-            result = await rest._request("GET", "/v5/market/kline", {
+            # 1. Загружаем историю для 1m ATR
+            result_1m = await rest._request("GET", "/v5/market/kline", {
                 "category": "spot", "symbol": symbol, "interval": "1", "limit": "20"
             })
-            rows = list(reversed(result.get("list", [])))
-            for row in rows:
+            rows_1m = list(reversed(result_1m.get("list", [])))
+            for row in rows_1m:
                 self.atr.feed_history(float(row[2]), float(row[3]), float(row[4]))
-            logger.info(f"📚 [MarketBuffer] История свечей загружена (20 шт). Начальный ATR: {self.atr.get_atr():.3f}")
+            
+            # 2. ✅ V2: Загружаем историю для 5m ATR
+            result_5m = await rest._request("GET", "/v5/market/kline", {
+                "category": "spot", "symbol": symbol, "interval": "5", "limit": "20"
+            })
+            rows_5m = list(reversed(result_5m.get("list", [])))
+            for row in rows_5m:
+                self.atr_5m.feed_history(float(row[2]), float(row[3]), float(row[4]))
+                
+            logger.info(f"📚 [MarketBuffer] История загружена. ATR(1m): {self.atr.get_atr():.3f}, ATR(5m): {self.atr_5m.get_atr():.3f}")
         except Exception as e:
             logger.warning(f"⚠️ [MarketBuffer] Не удалось загрузить историю ATR (будет прогрев через WS): {e}")
 
@@ -243,7 +255,6 @@ class MarketBuffer:
     
     async def _on_kline(self, payload):
         topic, data = payload.get("topic", ""), payload.get("data", [])
-        # ✅ Явно приводим kline к словарю
         if isinstance(data, list) and data:
             kline = data[-1]
         elif isinstance(data, dict):
@@ -255,10 +266,13 @@ class MarketBuffer:
             return
         
         if topic.startswith("kline.1"):
-            self.atr.update_kline_1m(kline)
+            self.atr.update_kline(kline)  # ✅ Переименовано в универсальное
             self._klines_count += 1
             if self.current_price == 0:
                 self.current_price = float(kline.get("close", kline.get("c", 0)))
+        elif topic.startswith("kline.5"):
+            # ✅ V2: Кормим 5-минутный калькулятор
+            self.atr_5m.update_kline(kline)
     
     async def _snapshot_loop(self):
         tick = 0
@@ -273,7 +287,7 @@ class MarketBuffer:
                     hvn = self.volume_profile.get_hvn(3)
                     poc_str = f"{poc['price']:.2f}" if poc else "-"
                     logger.info(
-                        f"🔍 [MarketBuffer] price={self.current_price:.2f} | ATR={self.atr.get_atr():.3f} | "
+                        f"🔍 [MarketBuffer] price={self.current_price:.2f} | ATR(1m)={self.atr.get_atr():.3f} | ATR(5m)={self.atr_5m.get_atr():.3f} | "
                         f"Δ5m={self.delta.get_velocity(300):+.1f} | BidWall={self.orderbook.get_max_bid_wall():.0f} "
                         f"AskWall={self.orderbook.get_max_ask_wall():.0f} | POC={poc_str}"
                     )
@@ -288,6 +302,7 @@ class MarketBuffer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "current_price": self.current_price,
             "atr": self.atr.get_atr(),
+            "atr_5m": self.atr_5m.get_atr(),  # ✅ V2: Добавлено в снапшот
             "walls": {
                 "walls_bid": self.orderbook.walls_bid, "walls_ask": self.orderbook.walls_ask,
                 "bid_v1_max": self.orderbook.get_max_bid_wall(), "ask_v1_max": self.orderbook.get_max_ask_wall(),
