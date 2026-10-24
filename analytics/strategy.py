@@ -59,7 +59,7 @@ class AdaptiveZoneV1:
     def __init__(self, event_bus: EventBus, rest_client=None, order_manager=None, 
                  passport_storage=None, position_monitor=None, shadow_mode: bool = True, 
                  min_departure_pct: float = 0.3, max_departure_pct: float = 4.0,
-                 config=None):  # ← 1. ДОБАВИЛИ параметр
+                 config=None):
         
         self.bus = event_bus
         self.rest_client = rest_client
@@ -70,11 +70,14 @@ class AdaptiveZoneV1:
         self.min_departure_pct = min_departure_pct
         self.max_departure_pct = max_departure_pct
         
-        self.config = config or {}  # ← 2. СОХРАНЯЕМ КОНФИГ
+        self.config = config or {}
         
-        # ← 3. КРИТИЧЕСКИ ВАЖНО: ЧИТАЕМ ФЛАГ ИЗ КОНФИГА (этого не хватало)
+        # ← КРИТИЧЕСКИ ВАЖНО: ЧИТАЕМ ФЛАГ ИЗ КОНФИГА
         self.exit_logic = self.config.get("trading", {}).get("exit_logic", "atr")
-        logger.info(f"🎯 AdaptiveZoneV1: exit_logic = '{self.exit_logic}'")
+        # ← V2/Блок5: Читаем TTL из конфига (дефолт 120 сек)
+        self.order_ttl_seconds = self.config.get("trading.orders.order_ttl_seconds", 120)
+        
+        logger.info(f"🎯 AdaptiveZoneV1: exit_logic = '{self.exit_logic}', order_ttl = {self.order_ttl_seconds}s")
         
         self.active_zones: List[AnomalyZone] = []
         self.current_thresholds: Optional[Any] = None
@@ -82,11 +85,12 @@ class AdaptiveZoneV1:
 
         self.zones_file = Path("logs/active_zones.json")
         self.zones_file.parent.mkdir(exist_ok=True)
-
         self._load_zones()
 
         self.bus.subscribe("ANALYTICS:THRESHOLDS", self._on_thresholds)
         self.bus.subscribe("MARKET:SNAPSHOT", self._on_snapshot)
+        # ✅ V2/Блок5: Подписка на событие отмены таймера для условного сброса зон
+        self.bus.subscribe("ORDER:TIMER_CANCELLED_WITH_ZONE", self._on_timer_cancelled)
 
         logger.info(f"🎯 AdaptiveZoneV1 инициализирована. Загружено {len(self.active_zones)} зон. Теневой режим: {shadow_mode}")
 
@@ -174,6 +178,49 @@ class AdaptiveZoneV1:
 
         # Обновляем зоны
         await self._process_zones(current_price, bid_v1_max, ask_v1_max, delta_5m)
+
+    async def _on_timer_cancelled(self, payload: Dict[str, Any]):
+        """
+        V2/Блок5: Обработка отмены ордера по таймауту.
+        Проверяет актуальность цены и решает: сбросить зону или инвалидировать.
+        """
+        zone_id = payload.get("zone_id")
+        if not zone_id:
+            return
+            
+        # Находим зону
+        zone = next((z for z in self.active_zones if z.id == zone_id), None)
+        if not zone or zone.state != "ACTIVE_TRADE":
+            return
+            
+        current_price = self.current_snapshot.get("current_price", 0.0) if self.current_snapshot else 0.0
+        if current_price == 0:
+            return
+            
+        # ✅ Проверка актуальности: цена всё ещё в коридоре ±0.8%?
+        distance_pct = abs(zone.price - current_price) / zone.price * 100
+        reset_threshold_pct = 0.8
+        
+        if distance_pct <= reset_threshold_pct:
+            # Цена близко → сбрасываем зону в DEPARTED для повторной попытки
+            zone.state = "DEPARTED"
+            logger.info(f"🔄 [{zone_id}] Conditional Reset: ордер отменен, цена в коридоре ({distance_pct:.2f}%). Зона сброшена в DEPARTED.")
+            autopsy_logger.info(json.dumps({
+                "event": "ZONE_RESET_AFTER_TIMEOUT", "zone_id": zone_id,
+                "distance_pct": round(distance_pct, 2), "threshold": reset_threshold_pct,
+                "current_price": current_price
+            }))
+        else:
+            # Цена ушла далеко → зона больше не актуальна
+            zone.state = "INVALIDATED"
+            logger.info(f"❌ [{zone_id}] Zone Invalidated: ордер отменен, цена ушла на {distance_pct:.2f}% (> {reset_threshold_pct}%).")
+            autopsy_logger.info(json.dumps({
+                "event": "ZONE_INVALIDATED_AFTER_TIMEOUT", "zone_id": zone_id,
+                "distance_pct": round(distance_pct, 2), "threshold": reset_threshold_pct,
+                "current_price": current_price
+            }))
+            
+        self._save_zones()
 
     async def _process_zones(self, current_price: float, bid_wall: float, ask_wall: float, delta_5m: float):
         if self.current_thresholds is None:
@@ -437,14 +484,13 @@ class AdaptiveZoneV1:
         }
 
     async def _execute_signal(self, signal: Dict[str, Any], zone: AnomalyZone):
-        """V2/Блок4: замок R4 → паспорт со стейт-машиной → ордер с orderLinkId.
-        Жизненный цикл после размещения ведёт monitor через _set_state()."""
+        """V2/Блок4+5: замок R4 → паспорт → ордер с orderLinkId → умный TTL."""
         from execution.passport import TradePassport, SignalSource
 
         logger.info(f"\n{'='*60} СИГНАЛ: {signal['side']} @ {signal['entry_price']} {'='*60}")
 
         if not self.order_manager:
-            logger.error("❌ OrderManager не инициализирован!")
+            logger.error(" OrderManager не инициализирован!")
             return
         if not self.passport_storage:
             logger.error("❌ PassportStorage не инициализирован!")
@@ -457,11 +503,11 @@ class AdaptiveZoneV1:
                 "event": "SIGNAL_REJECTED", "zone_id": zone.id, "side": signal['side'],
                 "reason": "LOCK_HELD", "entry": signal['entry_price']
             }))
-            zone.state = "DEPARTED"  # возвращаем зону в ожидание, не теряем её
+            zone.state = "DEPARTED"
             self._save_zones()
             return
 
-        # Создаём паспорт (чистая V2-схема)
+        # Создаём паспорт
         passport = TradePassport(
             signal_id=signal['signal_id'],
             strategy=signal['strategy'],
@@ -477,7 +523,6 @@ class AdaptiveZoneV1:
             sl_price=signal['sl_price'],
             be_price=signal.get('be_price'),
         )
-        # Инициализируем стейт-машину (IDLE + client_order_id)
         mgr = PassportManager(passport)
         mgr.set_state("SIGNAL_GENERATED", reason="adaptive zone signal", source="STRATEGY")
         mgr.set_state("ORDER_PREPARING", reason="building order", source="STRATEGY")
@@ -486,24 +531,26 @@ class AdaptiveZoneV1:
                            f"SL: {signal['sl_price']}, TP1: {signal['tp1_price']}, TP2: {signal['tp2_price']}, BE: {signal.get('be_price')}",
                            source="STRATEGY")
 
-        # Публикуем в шину — monitor подхватит и зарегистрирует менеджер
         await self.bus.publish("EXEC:NEW_TRADE", passport)
 
-        # Отправляем ордер с orderLinkId = client_order_id (закрытие гонки состояний)
+        # Отправляем ордер с orderLinkId
         limit_price = str(round(signal['entry_price'] * 0.9998, 2)) if signal['side'] == "LONG" else str(round(signal['entry_price'] * 1.0002, 2))
+        
+        # ✅ V2/Блок5: Передаем zone_id и используем configurable TTL
         success = await self.order_manager.place_entry_order(
-            passport, limit_price, timeout_seconds=30, order_link_id=passport.client_order_id
+            passport, limit_price, 
+            timeout_seconds=self.order_ttl_seconds,  # Было: 30, Стало: 120 (из конфига)
+            order_link_id=passport.client_order_id,
+            zone_id=zone.id  # ← Передаем ID зоны в OrderManager/TIMER
         )
 
         if success:
             mgr.set_state("ORDER_SENT", reason=f"limit @ {limit_price}", source="STRATEGY")
             passport.add_event("ACTION: ENTRY_PLACED", f"Лимитный ордер размещен по {limit_price}", source="STRATEGY")
-            logger.info(f"✅ [{passport.passport_id}] Ордер размещен (orderLinkId={passport.client_order_id}). Дальше ведёт monitor.")
+            logger.info(f"✅ [{passport.passport_id}] Ордер размещен (TTL={self.order_ttl_seconds}s, orderLinkId={passport.client_order_id}).")
             self.passport_storage.save(passport)
-            # ⚠️ Больше никакого sleep(60) и ручных проверок статуса —
-            # исполнение, защиту и закрытие ведёт PositionMonitor + RECON.
         else:
             mgr.set_state("ORDER_REJECTED", reason="place_entry_order failed", source="STRATEGY")
             passport.add_event("ERROR: ENTRY_FAILED", "Не удалось разместить ордер", source="STRATEGY")
-            logger.warning(f"⛔ [{passport.passport_id}] Ордер не размещён → ORDER_REJECTED")
+            logger.warning(f" [{passport.passport_id}] Ордер не размещён → ORDER_REJECTED")
             self.passport_storage.save(passport)

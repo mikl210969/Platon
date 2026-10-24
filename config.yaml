@@ -29,6 +29,8 @@ trading:
     sl_percent: 0.3
     breakeven_after_tp1: true
     planned_size: 7.0
+    order_ttl_seconds: 120  # ← ДОБАВИТЬ
+
 
 self_test:
   enabled: true

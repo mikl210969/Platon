@@ -35,14 +35,15 @@ class OrderManager:
             logger.error(f"❌ Ошибка проверки позиции: {e}")
             return False
 
-    async def place_entry_order(self, passport: TradePassport, price: str,
-                                timeout_seconds: int = 30,
-                                order_link_id: Optional[str] = None) -> bool:
+    async def place_entry_order(self, passport, limit_price: str, 
+                                timeout_seconds: int = 30, 
+                                order_link_id: Optional[str] = None,
+                                zone_id: Optional[str] = None):  # ← ДОБАВИТЬ ПАРАМЕТР
         try:
             has_position = await self.has_open_position(passport.symbol)
             if has_position:
                 passport.add_event("ERROR: POSITION_EXISTS", f"Уже есть открытая позиция по {passport.symbol}")
-                logger.warning(f"⚠️ [{passport.passport_id}] Пропуск: уже есть открытая позиция по {passport.symbol}")
+                logger.warning(f"️ [{passport.passport_id}] Пропуск: уже есть открытая позиция по {passport.symbol}")
                 return False
 
             passport.planned_size = passport.position_size
@@ -53,8 +54,9 @@ class OrderManager:
                 "sl_distance": abs(passport.entry_price - passport.sl_price) / passport.entry_price * 100
             })
 
-            passport.add_event("ACTION: PLACE_ENTRY", f"Размещение {passport.side} {passport.position_size} @ {price}")
-            logger.info(f"[{passport.passport_id}] Размещение входа: {passport.side} {passport.position_size} @ {price}")
+            # ✅ ИСПРАВЛЕНО: используем limit_price вместо price
+            passport.add_event("ACTION: PLACE_ENTRY", f"Размещение {passport.side} {passport.position_size} @ {limit_price}")
+            logger.info(f"[{passport.passport_id}] Размещение входа: {passport.side} {passport.position_size} @ {limit_price}")
 
             # V2/Блок4: orderLinkId для сопоставления UDS<->REST
             extra_params = {}
@@ -66,7 +68,7 @@ class OrderManager:
                 symbol=passport.symbol,
                 side="Buy" if passport.side == "LONG" else "Sell",
                 qty=str(passport.position_size),
-                price=price,
+                price=limit_price,  # ✅ ИСПРАВЛЕНО: используем limit_price
                 order_type="Limit",
                 time_in_force="GTC",
                 extra_params=extra_params,
@@ -74,20 +76,22 @@ class OrderManager:
 
             order_id = result.get("orderId")
             if order_id:
-                passport.add_order_record(order_id, "LIMIT_ENTRY", "New", float(price),
+                passport.add_order_record(order_id, "LIMIT_ENTRY", "New", float(limit_price),
                                           passport.position_size, client_order_id=order_link_id)
                 passport.add_event("SUCCESS: ORDER_PLACED", f"Биржа приняла ордер {order_id}")
 
+                # ✅ V2/Блок5: Передаем zone_id в таймер для условного сброса зоны
                 await self.order_timer.start_timer(
                     category=self.category,
                     symbol=passport.symbol,
                     order_id=order_id,
                     timeout_seconds=timeout_seconds,
                     planned_qty=passport.position_size,
+                    zone_id=zone_id,  # ← ПЕРЕДАЕМ ZONE_ID
                     fallback_to_market=False
                 )
 
-                logger.info(f"✅ [{passport.passport_id}] Вход размещен. Order ID: {order_id}")
+                logger.info(f"✅ [{passport.passport_id}] Вход размещен. Order ID: {order_id}, TTL: {timeout_seconds}s")
                 return True
             else:
                 passport.add_event("ERROR: NO_ORDER_ID", "Биржа не вернула orderId")
