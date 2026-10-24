@@ -205,9 +205,15 @@ async def main():
 
         shadow_mode = config.get("system.shadow_mode", True)
         stats_engine = StatisticsEngine(event_bus=bus, window_size=100, min_observations=60)
-        strategy = AdaptiveZoneV1(event_bus=bus, rest_client=rest, order_manager=om,
-                                passport_storage=storage, position_monitor=monitor,
-                                shadow_mode=shadow_mode, min_departure_pct=0.3, max_departure_pct=4.0)
+        strategy = AdaptiveZoneV1(
+            event_bus=bus,
+            rest_client=rest,
+            order_manager=om,
+            passport_storage=storage,
+            position_monitor=monitor,
+            shadow_mode=config.get("system.shadow_mode", True),
+            config=config  # ← ДОБАВИТЬ
+        )
 
         if shadow_mode:
             logger.info("👻 Стратегия работает в ТЕНЕВОМ режиме (только логи, без исполнения)")

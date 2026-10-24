@@ -56,9 +56,11 @@ class AnomalyZone:
 
 
 class AdaptiveZoneV1:
-    def __init__(self, event_bus: EventBus, rest_client=None, order_manager=None,
-                 passport_storage=None, position_monitor=None, shadow_mode: bool = True,
-                 min_departure_pct: float = 0.3, max_departure_pct: float = 4.0):
+    def __init__(self, event_bus: EventBus, rest_client=None, order_manager=None, 
+                 passport_storage=None, position_monitor=None, shadow_mode: bool = True, 
+                 min_departure_pct: float = 0.3, max_departure_pct: float = 4.0,
+                 config=None):  # ← 1. ДОБАВИЛИ параметр
+        
         self.bus = event_bus
         self.rest_client = rest_client
         self.order_manager: Optional['OrderManager'] = order_manager
@@ -67,7 +69,13 @@ class AdaptiveZoneV1:
         self.shadow_mode = shadow_mode
         self.min_departure_pct = min_departure_pct
         self.max_departure_pct = max_departure_pct
-
+        
+        self.config = config or {}  # ← 2. СОХРАНЯЕМ КОНФИГ
+        
+        # ← 3. КРИТИЧЕСКИ ВАЖНО: ЧИТАЕМ ФЛАГ ИЗ КОНФИГА (этого не хватало)
+        self.exit_logic = self.config.get("trading", {}).get("exit_logic", "atr")
+        logger.info(f"🎯 AdaptiveZoneV1: exit_logic = '{self.exit_logic}'")
+        
         self.active_zones: List[AnomalyZone] = []
         self.current_thresholds: Optional[Any] = None
         self.current_snapshot: Optional[Dict[str, Any]] = None
