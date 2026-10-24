@@ -33,7 +33,7 @@ trading:
 
 
 self_test:
-  enabled: true
+  enabled: false
   interval_seconds: 120
   test_order_qty: 7.0
   test_order_price_offset_percent: 10.0
