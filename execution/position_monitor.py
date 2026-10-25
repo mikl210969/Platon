@@ -282,9 +282,49 @@ class PositionMonitor:
                 passport.realized_pnl = passport.gross_pnl - passport.commission
 
                 passport.add_event("EXCHANGE: TP1_FILLED",
-                                   f"TP1 исполнен. P&L: {tp1_pnl:.2f}, комиссия: {tp1_comm:.4f}", source="UDS")
+                                f"TP1 исполнен. P&L: {tp1_pnl:.2f}, комиссия: {tp1_comm:.4f}", source="UDS")
                 self._safe_transition(passport, "TP1_PARTIAL_CLOSE",
-                                      reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
+                                    reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
+
+                # ✅ ИСПРАВЛЕНИЕ: Уменьшаем объем SL до остатка позиции после TP1
+                try:
+                    filled_tp1_qty = next(
+                        (o.get("qty", 0) for o in passport.orders 
+                        if o.get("type") == "LIMIT_TP1" and o.get("status") == "Filled"), 
+                        0
+                    )
+                    remaining_qty = passport.position_size - filled_tp1_qty
+
+                    if remaining_qty > 0:
+                        # Находим и отменяем старый SL
+                        old_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") == "New"), None)
+                        if old_sl:
+                            await self.om.rest.cancel_order(self.om.category, passport.symbol, old_sl["order_id"])
+                            old_sl["status"] = "Cancelled"
+                            passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для ресайза")
+                            
+                            # Выставляем новый SL на остаток
+                            trigger_dir = 2 if passport.side == "LONG" else 1
+                            new_sl_res = await self.om.rest.place_order(
+                                category=self.om.category, symbol=passport.symbol,
+                                side="Sell" if passport.side == "LONG" else "Buy",
+                                qty=str(remaining_qty), price="", order_type="Market",
+                                trigger_price=str(passport.sl_price), trigger_direction=trigger_dir,
+                                reduce_only=True
+                            )
+                            new_sl_id = new_sl_res.get("orderId")
+                            if new_sl_id:
+                                passport.add_order_record(new_sl_id, "STOP_SL", "New", passport.sl_price, float(remaining_qty))
+                                passport.add_event("SUCCESS: SL_RESIZED", f"Новый SL выставлен на {remaining_qty} SOL @ {passport.sl_price}")
+                                logger.info(f"🔄 [{passport.passport_id}] SL уменьшен до {remaining_qty} SOL после TP1")
+                            else:
+                                passport.add_event("ERROR: SL_RESIZE_FAILED", "Биржа не вернула orderId для нового SL")
+                                logger.error(f"❌ [{passport.passport_id}] Ошибка ресайза SL: нет orderId")
+                except Exception as e:
+                    # КРИТИЧЕСКИ ВАЖНО: Не даем сбою API убить мониторинг позиции
+                    passport.add_event("ERROR: SL_RESIZE_EXCEPTION", str(e))
+                    logger.error(f"❌ [{passport.passport_id}] Исключение при ресайзе SL: {e}. Позиция может остаться со старым SL или без него.")
+
                 self.storage.save(passport)
 
                 # ✅ ИСПРАВЛЕНИЕ: Переносим SL в безубыток ТОЛЬКО если be_price задан стратегией
@@ -293,7 +333,6 @@ class PositionMonitor:
                     await self.om.move_sl_to_breakeven(passport, str(passport.be_price))
                 else:
                     logger.info(f"⚠️ [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. Безубыток ОТКЛЮЧЕН (be_price=null), оставляем структурный SL.")
-
             # --- TP2 / SL / SL_BE исполнен → закрытие ---
             elif order_type in ("LIMIT_TP2", "STOP_SL", "STOP_SL_BE") and status == "Filled":
                 self._update_order_status(passport, order_id, "Filled")
