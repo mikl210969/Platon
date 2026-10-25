@@ -13,14 +13,18 @@ trading:
   symbol: "SOLUSDT"
   category: "linear"
   
-  # 🔑 КЛЮЧЕВОЙ ПЕРЕКЛЮЧАТЕЛЬ ЛОГИКИ ВЫХОДА
-  # "atr" = текущий live-режим (ATR-based)
-  # "structure" = режим бэктеста (+36%, Structure-based)
-  exit_logic: "structure" 
+  exit_logic: "structure"
+  
+  # ✅ НОВЫЙ РАЗДЕЛ: Валидация структуры
+  structure_validation:
+    min_retracement_atr_multiplier: 1.5  # Минимальный откат в ATR
+    require_volume_confirmation: false   # Пока false, включим после тестов
+    volume_threshold_multiplier: 1.2     # Объём должен быть > 120% медианы
+    require_delta_confirmation: false    # Пока false
   
   risk:
-    base_risk_usdt: 30.0       # Целевой риск на сделку ($)
-    max_position_size: 10.0    # Максимальный объем (SOL)
+    base_risk_usdt: 30.0
+    max_position_size: 10.0
     max_daily_loss: 100.0
   
   orders:
