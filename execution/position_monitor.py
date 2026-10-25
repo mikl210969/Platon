@@ -285,9 +285,14 @@ class PositionMonitor:
                                    f"TP1 исполнен. P&L: {tp1_pnl:.2f}, комиссия: {tp1_comm:.4f}", source="UDS")
                 self._safe_transition(passport, "TP1_PARTIAL_CLOSE",
                                       reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
-                logger.info(f"🚀 [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. SL → безубыток...")
-                await self.om.move_sl_to_breakeven(passport, str(passport.entry_price))
                 self.storage.save(passport)
+
+                # ✅ ИСПРАВЛЕНИЕ: Переносим SL в безубыток ТОЛЬКО если be_price задан стратегией
+                if passport.be_price is not None:
+                    logger.info(f"🚀 [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. SL → безубыток ({passport.be_price})...")
+                    await self.om.move_sl_to_breakeven(passport, str(passport.be_price))
+                else:
+                    logger.info(f"⚠️ [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. Безубыток ОТКЛЮЧЕН (be_price=null), оставляем структурный SL.")
 
             # --- TP2 / SL / SL_BE исполнен → закрытие ---
             elif order_type in ("LIMIT_TP2", "STOP_SL", "STOP_SL_BE") and status == "Filled":

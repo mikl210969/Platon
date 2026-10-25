@@ -392,14 +392,16 @@ class AdaptiveZoneV1:
             # ✅ РЕЖИМ СТРУКТУРЫ: Привязка к размеру отката
             if zone.side == "LONG":
                 dep_val = abs(zone.price - (zone.min_price_after or zone.price))
-                sl_price = (zone.min_price_after or zone.price) * 0.998
+                # SL должен быть НИЖЕ entry для LONG + буфер
+                sl_price = min((zone.min_price_after or zone.price) * 0.998, current_price * 0.995)
                 tp1_price = current_price + (dep_val * 0.5)
                 tp2_price = current_price + (dep_val * 1.0)
                 be_price = None
                 sl_reason = f"Structure: SL за минимумом отката (Dep={dep_val:.3f})"
             else:  # SHORT
                 dep_val = abs((zone.max_price_after or zone.price) - zone.price)
-                sl_price = (zone.max_price_after or zone.price) * 1.002
+                # SL должен быть ВЫШЕ entry для SHORT + буфер
+                sl_price = max((zone.max_price_after or zone.price) * 1.002, current_price * 1.005)
                 tp1_price = current_price - (dep_val * 0.5)
                 tp2_price = current_price - (dep_val * 1.0)
                 be_price = None
