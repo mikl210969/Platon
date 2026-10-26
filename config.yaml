@@ -15,12 +15,18 @@ trading:
   
   exit_logic: "structure"
   
-  # ✅ НОВЫЙ РАЗДЕЛ: Валидация структуры
+  # ✅ ПОЛНЫЙ РАЗДЕЛ: Валидация структуры и Умный TP2
   structure_validation:
-    min_retracement_atr_multiplier: 1.5  # Минимальный откат в ATR
-    require_volume_confirmation: false   # Пока false, включим после тестов
-    volume_threshold_multiplier: 1.2     # Объём должен быть > 120% медианы
-    require_delta_confirmation: false    # Пока false
+    wall_volume_multiple: 4.0          # Стена должна быть >= 4× медианы за 28 баров
+    wall_baseline_bars: 28             # Окно для расчёта медианы объёма
+    min_retracement_atr_multiplier: 1.5 # Минимальный откат 1.5 × ATR(5m)
+    departure_max_bars: 24             # Таймаут зоны: 24 бара (2 часа)
+    sl_buffer_atr5m: 1.0               # Буфер SL = 1.0 × ATR(5m) от экстремума
+    tp1_risk_multiple: 1.5             # TP1 = entry ± (risk_dist × 1.5)
+    tp2_risk_multiple: 3.0             # TP2 = entry ± (risk_dist × 3.0)
+    post_tp1_logic: "tp2_protect"      # Логика после TP1 (перенос SL на TP2 + буфер)
+    tp2_protection_buffer_mult: 3.0    # Множитель для расчёта буфера комиссий
+    commission_rate: 0.0004            # 0.04% (комиссия Bybit)
   
   risk:
     base_risk_usdt: 30.0
@@ -28,13 +34,9 @@ trading:
     max_daily_loss: 100.0
   
   orders:
-    tp1_percent: 0.5
-    tp2_percent: 1.0
-    sl_percent: 0.3
-    breakeven_after_tp1: true
-    planned_size: 7.0
-    order_ttl_seconds: 120  # ← ДОБАВИТЬ
-
+    breakeven_after_tp1: false         # Отключено, так как работает post_tp1_logic
+    planned_size: 10.0                 # Для динамического сайзинга
+    order_ttl_seconds: 120             # Умный таймер
 
 self_test:
   enabled: false
@@ -49,5 +51,5 @@ logging:
 system:
   startup_test: "none"
   test_trades_count: 10
-  signal_source: "off"    # "random" = тестовый генератор, "off" = только сбор данных
-  shadow_mode: false      # true = теневой режим, false = боевой
+  signal_source: "off"                 # "off" = только сбор данных и реальные сигналы
+  shadow_mode: false                   # false = боевой режим

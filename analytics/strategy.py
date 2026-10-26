@@ -74,7 +74,7 @@ class AdaptiveZoneV1:
         self.config = config or {}
         
         # ← КРИТИЧЕСКИ ВАЖНО: ЧИТАЕМ ФЛАГ ИЗ КОНФИГА
-        self.exit_logic = self.config.get("trading", {}).get("exit_logic", "atr")
+        self.exit_logic = self.config.get("trading.exit_logic", "atr")
         # ← V2/Блок5: Читаем TTL из конфига (дефолт 120 сек)
         self.order_ttl_seconds = self.config.get("trading.orders.order_ttl_seconds", 120)
         
@@ -361,6 +361,21 @@ class AdaptiveZoneV1:
         if not (zone.price * 0.995 <= current_price <= zone.price * 1.005):
             return None
 
+        # ✅ НОВОЕ: Проверка таймаута устаревания зоны (читаем из твоего конфига)
+        departure_max_bars = self.config.get("trading.structure_validation.departure_max_bars", 24)
+        max_age_seconds = departure_max_bars * 300
+        zone_age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(zone.timestamp)).total_seconds()
+        
+        if zone_age_seconds > max_age_seconds:
+            zone.state = "INVALIDATED"
+            self._save_zones()
+            logger.info(f"⏳ [{zone.id}] Zone invalidated: departure timeout ({zone_age_seconds/3600:.1f}h > {departure_max_bars} bars)")
+            autopsy_logger.info(json.dumps({
+                "event": "ZONE_INVALIDATED", "zone_id": zone.id, "reason": "departure_timeout",
+                "age_hours": round(zone_age_seconds/3600, 2)
+            }))
+            return None
+
         # 2. Сумма дельты за буфер
         zone_delta_sum = sum(c.get("delta", 0.0) for c in zone.candles_buffer)
         
@@ -384,62 +399,44 @@ class AdaptiveZoneV1:
         if exit_mode == "structure":
             atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
             
-            # Читаем настройки валидации из конфига
-            struct_cfg = self.config.get("trading", {}).get("structure_validation", {})
-            wall_mult = struct_cfg.get("wall_volume_multiple", 4.0)
-            departure_max_bars = struct_cfg.get("departure_max_bars", 24)
-            sl_buffer_atr = struct_cfg.get("sl_buffer_atr5m", 1.0)
-            tp1_mult = struct_cfg.get("tp1_risk_multiple", 1.5)
-            tp2_mult = struct_cfg.get("tp2_risk_multiple", 3.0)
-
-            # ✅ 1. ПРОВЕРКА ТАЙМАУТА ЗОНЫ (24 бара * 5 мин = 7200 сек)
-            zone_dt = datetime.fromisoformat(zone.timestamp)
-            now = datetime.now(timezone.utc)
-            bars_since_creation = int((now - zone_dt).total_seconds() / 300)
-            
-            if bars_since_creation > departure_max_bars:
-                logger.info(f"⚠️ [{zone.id}] Structure signal rejected: departure timeout ({bars_since_creation} bars)")
-                zone.state = "INVALIDATED"
-                self._save_zones()
-                return None
-
-            # ✅ 2. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (динамическая медиана)
+            # ✅ 1. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (с защитой от спама)
+            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
             
             if zone.side == "LONG":
                 if zone.volume < (wall_mult * median_bid):
-                    # ✅ АНТИ-СПАМ: Пишем в лог только один раз
                     if not zone.rejection_logged:
                         logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_bid:.0f}")
                         zone.rejection_logged = True
                     return None
                 else:
-                    # Сбрасываем флаг, если стена усилилась (даем зоне второй шанс)
                     zone.rejection_logged = False
-            else:  # SHORT
+            else:
                 if zone.volume < (wall_mult * median_ask):
-                    # ✅ АНТИ-СПАМ: Пишем в лог только один раз
                     if not zone.rejection_logged:
                         logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_ask:.0f}")
                         zone.rejection_logged = True
                     return None
                 else:
-                    # Сбрасываем флаг, если стена усилилась
                     zone.rejection_logged = False
 
-            # ✅ 3. РАСЧЁТ УРОВНЕЙ ЧЕРЕЗ RISK_DIST (математический R:R)
+            # ✅ 2. РАСЧЁТ УРОВНЕЙ ЧЕРЕЗ RISK_DIST
             if zone.side == "LONG":
                 min_extremum = zone.min_price_after
                 if min_extremum is None or min_extremum >= zone.price:
                     return None
                 
                 dep_val = abs(zone.price - min_extremum)
-                if dep_val < atr_5m * 1.5:
+                if dep_val < atr_5m * self.config.get("trading.structure_validation.min_retracement_atr_multiplier", 1.5):
                     return None
                 
+                sl_buffer_atr = self.config.get("trading.structure_validation.sl_buffer_atr5m", 1.0)
                 sl_price = min_extremum - (atr_5m * sl_buffer_atr)
                 sl_distance = abs(current_price - sl_price)
+                
+                tp1_mult = self.config.get("trading.structure_validation.tp1_risk_multiple", 1.5)
+                tp2_mult = self.config.get("trading.structure_validation.tp2_risk_multiple", 3.0)
                 
                 tp1_price = current_price + (sl_distance * tp1_mult)
                 tp2_price = current_price + (sl_distance * tp2_mult)
@@ -452,18 +449,22 @@ class AdaptiveZoneV1:
                     return None
                 
                 dep_val = abs(max_extremum - zone.price)
-                if dep_val < atr_5m * 1.5:
+                if dep_val < atr_5m * self.config.get("trading.structure_validation.min_retracement_atr_multiplier", 1.5):
                     return None
                 
+                sl_buffer_atr = self.config.get("trading.structure_validation.sl_buffer_atr5m", 1.0)
                 sl_price = max_extremum + (atr_5m * sl_buffer_atr)
                 sl_distance = abs(current_price - sl_price)
+                
+                tp1_mult = self.config.get("trading.structure_validation.tp1_risk_multiple", 1.5)
+                tp2_mult = self.config.get("trading.structure_validation.tp2_risk_multiple", 3.0)
                 
                 tp1_price = current_price - (sl_distance * tp1_mult)
                 tp2_price = current_price - (sl_distance * tp2_mult)
                 be_price = None
                 sl_reason = f"Structure HIGH: SL за максимумом (Dist={sl_distance:.3f}, ATR_buf={atr_5m:.3f})"
         else:
-            # ATR-based fallback (оставлен для совместимости, если exit_logic != "structure")
+            # ATR-based fallback
             atr = self.current_snapshot.get("atr", 0.5) if self.current_snapshot else 0.5
             sl_distance = atr * 1.7
             if zone.side == "LONG":
@@ -529,6 +530,7 @@ class AdaptiveZoneV1:
             "strategy": "AdaptiveZoneV1",
             "comment": f"Adaptive Zone (Δ: {delta_formatted}, Exit: {exit_mode}, Risk: ${actual_risk_usdt})"
         }
+    
     async def _execute_signal(self, signal: Dict[str, Any], zone: AnomalyZone):
         """V2/Блок4+5: замок R4 → паспорт → ордер с orderLinkId → умный TTL."""
         from execution.passport import TradePassport, SignalSource

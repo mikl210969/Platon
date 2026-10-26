@@ -15,7 +15,8 @@ logger = logging.getLogger("plato.position_monitor")
 
 
 class PositionMonitor:
-    def __init__(self, event_bus: EventBus, order_manager: OrderManager, storage: PassportStorage):
+    def __init__(self, config, event_bus: EventBus, order_manager: OrderManager, storage: PassportStorage):
+        self.config = config
         self.bus = event_bus
         self.om = order_manager
         self.storage = storage
@@ -268,7 +269,7 @@ class PositionMonitor:
                 await self.om.place_protective_orders(passport)
                 self.storage.save(passport)
 
-            # --- TP1 исполнен (УМНЫЙ TP2: tp2_protect) ---
+            # --- TP1 исполнен ---
             elif order_type == "LIMIT_TP1" and status in ("Filled", "PartiallyFilled"):
                 self._update_order_status(passport, order_id, "Filled")
                 tp1_qty = passport.position_size / 2.0
@@ -284,8 +285,19 @@ class PositionMonitor:
                 self._safe_transition(passport, "TP1_PARTIAL_CLOSE",
                                     reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
 
-                # ✅ ЛОГИКА TP2_PROTECT
+                # ✅ УМНЫЙ TP2 (tp2_protect): Переносим SL на уровень TP2 + буфер комиссий
                 try:
+                    # Читаем параметры через точечную нотацию (как в main.py)
+                    commission_rate = self.config.get("trading.structure_validation.commission_rate", 0.0004)
+                    buffer_mult = self.config.get("trading.structure_validation.tp2_protection_buffer_mult", 3.0)
+                    buffer = passport.entry_price * commission_rate * buffer_mult
+                    
+                    if passport.side == "LONG":
+                        new_sl_price = passport.tp2_price + buffer
+                    else:  # SHORT
+                        new_sl_price = passport.tp2_price - buffer
+
+                    # Рассчитываем остаток позиции для ресайза
                     filled_tp1_qty = next(
                         (o.get("qty", 0) for o in passport.orders 
                         if o.get("type") == "LIMIT_TP1" and o.get("status") == "Filled"), 
@@ -294,26 +306,17 @@ class PositionMonitor:
                     remaining_qty = passport.position_size - filled_tp1_qty
 
                     if remaining_qty > 0:
-                        # 1. Отменяем старый структурный SL
+                        # Отменяем старый структурный SL
                         old_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") == "New"), None)
                         if old_sl:
                             await self.om.rest.cancel_order(self.om.category, passport.symbol, old_sl["order_id"])
                             old_sl["status"] = "Cancelled"
-                            passport.add_event("ACTION: SL_CANCELLED_FOR_PROTECT", f"Старый SL ({old_sl['order_id']}) отменен для tp2_protect")
+                            passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для tp2_protect")
                         
-                        # 2. Рассчитываем буфер и новый уровень защиты
-                        config = getattr(self, 'config', {})
-                        comm_rate = config.get("trading", {}).get("commission_rate", 0.0004)
-                        buffer_mult = config.get("trading", {}).get("tp2_protection_buffer_mult", 3.0)
-                        buffer = passport.entry_price * comm_rate * buffer_mult
+                        # ✅ ИСПРАВЛЕНО: 1 = цена идет вниз (для LONG), 2 = цена идет вверх (для SHORT)
+                        trigger_dir = 1 if passport.side == "LONG" else 2
                         
-                        if passport.side == "LONG":
-                            new_sl_price = passport.tp2_price + buffer
-                        else:
-                            new_sl_price = passport.tp2_price - buffer
-                        
-                        # 3. Выставляем новый защитный ордер на ОСТАТОК позиции
-                        trigger_dir = 2 if passport.side == "LONG" else 1
+                        # Выставляем новый SL на остаток позиции по цене TP2 + буфер
                         new_sl_res = await self.om.rest.place_order(
                             category=self.om.category, symbol=passport.symbol,
                             side="Sell" if passport.side == "LONG" else "Buy",
@@ -323,14 +326,15 @@ class PositionMonitor:
                         )
                         new_sl_id = new_sl_res.get("orderId")
                         if new_sl_id:
-                            passport.add_order_record(new_sl_id, "STOP_SL_PROTECT", "New", new_sl_price, float(remaining_qty))
-                            passport.add_event("SUCCESS: TP2_PROTECT_APPLIED", f"Новый SL выставлен на {remaining_qty} SOL @ {new_sl_price:.4f} (TP2 + buffer)")
-                            logger.info(f"🛡️ [{passport.passport_id}] Умный TP2 активирован: SL перенесён на {new_sl_price:.4f}")
+                            passport.add_order_record(new_sl_id, "STOP_SL_BE", "New", float(new_sl_price), float(remaining_qty))
+                            passport.add_event("SUCCESS: TP2_PROTECT_ACTIVE", f"SL перенесен на TP2+буфер: {new_sl_price:.4f} на {remaining_qty} SOL")
+                            logger.info(f"🛡️ [{passport.passport_id}] TP2_PROTECT: SL moved to {new_sl_price:.4f} (TP2 + buffer) for {remaining_qty} SOL")
                         else:
-                            passport.add_event("ERROR: TP2_PROTECT_FAILED", "Биржа не вернула orderId для защитного SL")
+                            passport.add_event("ERROR: TP2_PROTECT_FAILED", "Биржа не вернула orderId для нового SL")
+                            logger.error(f"❌ [{passport.passport_id}] Ошибка tp2_protect: нет orderId")
                 except Exception as e:
                     passport.add_event("ERROR: TP2_PROTECT_EXCEPTION", str(e))
-                    logger.error(f"❌ [{passport.passport_id}] Исключение при применении tp2_protect: {e}")
+                    logger.error(f"❌ [{passport.passport_id}] Исключение при tp2_protect: {e}")
 
                 self.storage.save(passport)
 

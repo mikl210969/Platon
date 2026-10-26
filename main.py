@@ -138,7 +138,7 @@ async def main():
     uds = BybitPrivateWSClient(api_key, api_secret, ws_url, bus)
 
     om = OrderManager(rest, category="linear", event_bus=bus)
-    monitor = PositionMonitor(bus, om, storage)
+    monitor = PositionMonitor(config, bus, om, storage)
 
     # Несекретные настройки оставляем в config.yaml
     symbol = config.get("trading.symbol", "SOLUSDT")
