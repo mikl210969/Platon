@@ -53,6 +53,7 @@ class AnomalyZone:
     min_price_after: Optional[float] = None
     max_price_after: Optional[float] = None
     candles_buffer: List[Dict[str, Any]] = field(default_factory=list)
+    rejection_logged: bool = False  # ← ✅ ДОБАВИТЬ ЭТУ СТРОКУ
 
 
 class AdaptiveZoneV1:
@@ -402,18 +403,30 @@ class AdaptiveZoneV1:
                 self._save_zones()
                 return None
 
-            # ✅ 2. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (4.0 × медиана)
+            # ✅ 2. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (динамическая медиана)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
             
             if zone.side == "LONG":
                 if zone.volume < (wall_mult * median_bid):
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_bid:.0f}")
+                    # ✅ АНТИ-СПАМ: Пишем в лог только один раз
+                    if not zone.rejection_logged:
+                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_bid:.0f}")
+                        zone.rejection_logged = True
                     return None
-            else:
+                else:
+                    # Сбрасываем флаг, если стена усилилась (даем зоне второй шанс)
+                    zone.rejection_logged = False
+            else:  # SHORT
                 if zone.volume < (wall_mult * median_ask):
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_ask:.0f}")
+                    # ✅ АНТИ-СПАМ: Пишем в лог только один раз
+                    if not zone.rejection_logged:
+                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_ask:.0f}")
+                        zone.rejection_logged = True
                     return None
+                else:
+                    # Сбрасываем флаг, если стена усилилась
+                    zone.rejection_logged = False
 
             # ✅ 3. РАСЧЁТ УРОВНЕЙ ЧЕРЕЗ RISK_DIST (математический R:R)
             if zone.side == "LONG":
@@ -516,7 +529,6 @@ class AdaptiveZoneV1:
             "strategy": "AdaptiveZoneV1",
             "comment": f"Adaptive Zone (Δ: {delta_formatted}, Exit: {exit_mode}, Risk: ${actual_risk_usdt})"
         }
-
     async def _execute_signal(self, signal: Dict[str, Any], zone: AnomalyZone):
         """V2/Блок4+5: замок R4 → паспорт → ордер с orderLinkId → умный TTL."""
         from execution.passport import TradePassport, SignalSource
