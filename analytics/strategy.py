@@ -369,14 +369,6 @@ class AdaptiveZoneV1:
 
         if futures_price and futures_price > 0:
             spread_pct = abs(current_price - futures_price) / current_price * 100
-
-            if zone.price * 0.995 <= current_price <= zone.price * 1.005:
-                autopsy_logger.info(json.dumps({
-                    "event": "SPREAD_CHECK", "zone_id": zone.id, "side": zone.side,
-                    "spot_price": current_price, "futures_price": futures_price,
-                    "spread_pct": round(spread_pct, 4)
-                }))
-
             if spread_pct > 0.15:
                 logger.warning(f"⚠️ [{zone.id}] Спред спот/фьючерс {spread_pct:.3f}% > 0.15%. Сигнал отменен.")
                 autopsy_logger.info(json.dumps({
@@ -389,113 +381,78 @@ class AdaptiveZoneV1:
         exit_mode = getattr(self, 'exit_logic', 'atr')
         
         if exit_mode == "structure":
-            # ✅ STRICT STRUCTURE MODE: Только High Confidence
             atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
             
             # Читаем настройки валидации из конфига
             struct_cfg = self.config.get("trading", {}).get("structure_validation", {})
-            require_volume = struct_cfg.get("require_volume_confirmation", False)
-            require_delta = struct_cfg.get("require_delta_confirmation", False)
-            min_retracement_atr = struct_cfg.get("min_retracement_atr_multiplier", 1.5)
+            wall_mult = struct_cfg.get("wall_volume_multiple", 4.0)
+            departure_max_bars = struct_cfg.get("departure_max_bars", 24)
+            sl_buffer_atr = struct_cfg.get("sl_buffer_atr5m", 1.0)
+            tp1_mult = struct_cfg.get("tp1_risk_multiple", 1.5)
+            tp2_mult = struct_cfg.get("tp2_risk_multiple", 3.0)
 
+            # ✅ 1. ПРОВЕРКА ТАЙМАУТА ЗОНЫ (24 бара * 5 мин = 7200 сек)
+            zone_dt = datetime.fromisoformat(zone.timestamp)
+            now = datetime.now(timezone.utc)
+            bars_since_creation = int((now - zone_dt).total_seconds() / 300)
+            
+            if bars_since_creation > departure_max_bars:
+                logger.info(f"⚠️ [{zone.id}] Structure signal rejected: departure timeout ({bars_since_creation} bars)")
+                zone.state = "INVALIDATED"
+                self._save_zones()
+                return None
+
+            # ✅ 2. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (4.0 × медиана)
+            median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
+            median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
+            
+            if zone.side == "LONG":
+                if zone.volume < (wall_mult * median_bid):
+                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_bid:.0f}")
+                    return None
+            else:
+                if zone.volume < (wall_mult * median_ask):
+                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_ask:.0f}")
+                    return None
+
+            # ✅ 3. РАСЧЁТ УРОВНЕЙ ЧЕРЕЗ RISK_DIST (математический R:R)
             if zone.side == "LONG":
                 min_extremum = zone.min_price_after
-                
-                # ❌ ПРОВЕРКА 1: Экстремум должен существовать и быть НИЖЕ цены зоны
                 if min_extremum is None or min_extremum >= zone.price:
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: no valid min_price_after")
-                    autopsy_logger.info(json.dumps({
-                        "event": "SIGNAL_REJECTED", "zone_id": zone.id,
-                        "reason": "no_structure_extremum", "min_price_after": min_extremum
-                    }))
                     return None
                 
                 dep_val = abs(zone.price - min_extremum)
-                
-                # ❌ ПРОВЕРКА 2: Откат должен быть >= 1.5 × ATR_5m
-                if dep_val < atr_5m * min_retracement_atr:
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak retracement {dep_val:.3f} < {atr_5m * min_retracement_atr:.3f}")
-                    autopsy_logger.info(json.dumps({
-                        "event": "SIGNAL_REJECTED", "zone_id": zone.id,
-                        "reason": "weak_retracement", "dep_val": dep_val,
-                        "atr_5m": atr_5m, "threshold": atr_5m * min_retracement_atr
-                    }))
+                if dep_val < atr_5m * 1.5:
                     return None
                 
-                # ✅ ПРОВЕРКА 3 (Опционально): Order-flow подтверждение на экстремуме
-                if require_volume or require_delta:
-                    extremum_candle = min(zone.candles_buffer, key=lambda c: c.get("low", c.get("close", float('inf'))))
-                    candle_volume = extremum_candle.get("volume", 0)
-                    candle_delta = extremum_candle.get("delta", 0)
-                    
-                    median_volume = getattr(thresholds, 'median_volume', 0) or 0
-                    median_delta = getattr(thresholds, 'median_delta', 0) or 0
-                    
-                    if require_volume and candle_volume < (median_volume * 1.2):
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: low volume at extremum")
-                        return None
-                    if require_delta and candle_delta >= 0: # Для LONG нужна отрицательная дельта (покупки)
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: no delta confirmation")
-                        return None
+                sl_price = min_extremum - (atr_5m * sl_buffer_atr)
+                sl_distance = abs(current_price - sl_price)
                 
-                # ✅ HIGH CONFIDENCE STRUCTURE LONG
-                sl_price = min_extremum * 0.998  # Буфер 0.2% ниже экстремума
-                tp1_price = current_price + (dep_val * 0.5)
-                tp2_price = current_price + (dep_val * 1.0)
+                tp1_price = current_price + (sl_distance * tp1_mult)
+                tp2_price = current_price + (sl_distance * tp2_mult)
                 be_price = None
-                sl_reason = f"Structure HIGH: SL за минимумом отката (Dep={dep_val:.3f}, ATR={atr_5m:.3f})"
+                sl_reason = f"Structure HIGH: SL за минимумом (Dist={sl_distance:.3f}, ATR_buf={atr_5m:.3f})"
                 
             else:  # SHORT
                 max_extremum = zone.max_price_after
-                
-                # ❌ ПРОВЕРКА 1: Экстремум должен существовать и быть ВЫШЕ цены зоны
                 if max_extremum is None or max_extremum <= zone.price:
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: no valid max_price_after")
-                    autopsy_logger.info(json.dumps({
-                        "event": "SIGNAL_REJECTED", "zone_id": zone.id,
-                        "reason": "no_structure_extremum", "max_price_after": max_extremum
-                    }))
                     return None
                 
                 dep_val = abs(max_extremum - zone.price)
-                
-                # ❌ ПРОВЕРКА 2: Откат должен быть >= 1.5 × ATR_5m
-                if dep_val < atr_5m * min_retracement_atr:
-                    logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak retracement {dep_val:.3f} < {atr_5m * min_retracement_atr:.3f}")
-                    autopsy_logger.info(json.dumps({
-                        "event": "SIGNAL_REJECTED", "zone_id": zone.id,
-                        "reason": "weak_retracement", "dep_val": dep_val,
-                        "atr_5m": atr_5m, "threshold": atr_5m * min_retracement_atr
-                    }))
+                if dep_val < atr_5m * 1.5:
                     return None
                 
-                # ✅ ПРОВЕРКА 3 (Опционально): Order-flow подтверждение на экстремуме
-                if require_volume or require_delta:
-                    extremum_candle = max(zone.candles_buffer, key=lambda c: c.get("high", c.get("close", float('-inf'))))
-                    candle_volume = extremum_candle.get("volume", 0)
-                    candle_delta = extremum_candle.get("delta", 0)
-                    
-                    median_volume = getattr(thresholds, 'median_volume', 0) or 0
-                    median_delta = getattr(thresholds, 'median_delta', 0) or 0
-                    
-                    if require_volume and candle_volume < (median_volume * 1.2):
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: low volume at extremum")
-                        return None
-                    if require_delta and candle_delta <= 0: # Для SHORT нужна положительная дельта (продажи)
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: no delta confirmation")
-                        return None
+                sl_price = max_extremum + (atr_5m * sl_buffer_atr)
+                sl_distance = abs(current_price - sl_price)
                 
-                # ✅ HIGH CONFIDENCE STRUCTURE SHORT
-                sl_price = max_extremum * 1.002  # Буфер 0.2% выше экстремума
-                tp1_price = current_price - (dep_val * 0.5)
-                tp2_price = current_price - (dep_val * 1.0)
+                tp1_price = current_price - (sl_distance * tp1_mult)
+                tp2_price = current_price - (sl_distance * tp2_mult)
                 be_price = None
-                sl_reason = f"Structure HIGH: SL за максимумом отката (Dep={dep_val:.3f}, ATR={atr_5m:.3f})"
+                sl_reason = f"Structure HIGH: SL за максимумом (Dist={sl_distance:.3f}, ATR_buf={atr_5m:.3f})"
         else:
-            # ✅ LIVE-РЕЖИМ (ATR-based): Универсальный скальпинг (оставлен для совместимости)
+            # ATR-based fallback (оставлен для совместимости, если exit_logic != "structure")
             atr = self.current_snapshot.get("atr", 0.5) if self.current_snapshot else 0.5
             sl_distance = atr * 1.7
-            
             if zone.side == "LONG":
                 sl_price = current_price - sl_distance
                 tp1_price = current_price + (sl_distance * 1.5)
@@ -506,29 +463,23 @@ class AdaptiveZoneV1:
                 tp1_price = current_price - (sl_distance * 1.5)
                 tp2_price = current_price - (sl_distance * 3.0)
                 be_price = current_price * 0.999
-                
             sl_reason = f"ATR(1m)-based: SL dist={sl_distance:.3f} (1.7x)"
 
         # === ФИЛЬТР ДЕЛЬТЫ ===
         if zone.side == "LONG":
             if zone_delta_sum >= thresholds.delta_threshold_long:
                 return None
-        else:  # SHORT
+        else:
             if zone_delta_sum <= thresholds.delta_threshold_short:
                 return None
 
         # === ДИНАМИЧЕСКИЙ САЙЗИНГ ===
-        TARGET_RISK_USDT = 30.0      # Целевой риск на сделку ($)
-        MAX_POSITION_SIZE = 10.0     # Максимальный объем (SOL)
-        MIN_POSITION_SIZE = 0.1      # Минимальный объем (SOL)
+        TARGET_RISK_USDT = 30.0
+        MAX_POSITION_SIZE = 10.0
+        MIN_POSITION_SIZE = 0.1
         
         sl_dist_usd = abs(current_price - sl_price)
-        
-        if sl_dist_usd > 0:
-            safe_qty = TARGET_RISK_USDT / sl_dist_usd
-        else:
-            safe_qty = MAX_POSITION_SIZE
-            
+        safe_qty = TARGET_RISK_USDT / sl_dist_usd if sl_dist_usd > 0 else MAX_POSITION_SIZE
         final_qty = max(MIN_POSITION_SIZE, min(safe_qty, MAX_POSITION_SIZE))
         actual_risk_usdt = round(sl_dist_usd * final_qty, 2)
         delta_formatted = round(zone_delta_sum, 2)
@@ -561,7 +512,7 @@ class AdaptiveZoneV1:
             "tp2_price": tp2_price,
             "be_price": be_price,
             "quantity": final_qty,
-            "confidence": 0.95, # Повысили до 0.95, так как теперь только High Confidence
+            "confidence": 0.95,
             "strategy": "AdaptiveZoneV1",
             "comment": f"Adaptive Zone (Δ: {delta_formatted}, Exit: {exit_mode}, Risk: ${actual_risk_usdt})"
         }

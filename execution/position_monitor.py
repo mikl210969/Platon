@@ -245,7 +245,7 @@ class PositionMonitor:
                 entry_comm = exec_fee if exec_fee > 0 else passport.calculate_commission(passport.entry_price, passport.filled_qty)
                 passport.commission += entry_comm
 
-                # Фактический риск (баг 1 архива)
+                # Фактический риск
                 sl_dist = abs(passport.entry_price - passport.sl_price)
                 passport.actual_risk_usdt = passport.filled_qty * sl_dist
                 passport.cap_applied = passport.filled_qty < (passport.target_risk_usdt / sl_dist - 1e-9) if sl_dist > 0 else False
@@ -255,12 +255,10 @@ class PositionMonitor:
                                    source="UDS")
                 self._get_manager(passport).log_exchange_verified(order_id, passport.entry_price, passport.filled_qty)
 
-                # Переход: PARTIAL_FILL -> POSITION_OPEN или ORDER_SENT/PENDING -> POSITION_OPEN
                 cur = self._get_manager(passport).current_state()
                 if cur == "PARTIAL_FILL":
                     self._safe_transition(passport, "POSITION_OPEN", reason="entry fully filled", source="UDS")
                 else:
-                    # из ORDER_SENT/ORDER_PENDING сразу в POSITION_OPEN (матрица разрешает)
                     self._safe_transition(passport, "POSITION_OPEN", reason="entry filled", source="UDS")
 
                 passport.add_event("GUARD_REGISTERED",
@@ -270,7 +268,7 @@ class PositionMonitor:
                 await self.om.place_protective_orders(passport)
                 self.storage.save(passport)
 
-            # --- TP1 исполнен ---
+            # --- TP1 исполнен (УМНЫЙ TP2: tp2_protect) ---
             elif order_type == "LIMIT_TP1" and status in ("Filled", "PartiallyFilled"):
                 self._update_order_status(passport, order_id, "Filled")
                 tp1_qty = passport.position_size / 2.0
@@ -286,7 +284,7 @@ class PositionMonitor:
                 self._safe_transition(passport, "TP1_PARTIAL_CLOSE",
                                     reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
 
-                # ✅ ИСПРАВЛЕНИЕ: Уменьшаем объем SL до остатка позиции после TP1
+                # ✅ ЛОГИКА TP2_PROTECT
                 try:
                     filled_tp1_qty = next(
                         (o.get("qty", 0) for o in passport.orders 
@@ -296,59 +294,64 @@ class PositionMonitor:
                     remaining_qty = passport.position_size - filled_tp1_qty
 
                     if remaining_qty > 0:
-                        # Находим и отменяем старый SL
+                        # 1. Отменяем старый структурный SL
                         old_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") == "New"), None)
                         if old_sl:
                             await self.om.rest.cancel_order(self.om.category, passport.symbol, old_sl["order_id"])
                             old_sl["status"] = "Cancelled"
-                            passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для ресайза")
-                            
-                            # Выставляем новый SL на остаток
-                            trigger_dir = 2 if passport.side == "LONG" else 1
-                            new_sl_res = await self.om.rest.place_order(
-                                category=self.om.category, symbol=passport.symbol,
-                                side="Sell" if passport.side == "LONG" else "Buy",
-                                qty=str(remaining_qty), price="", order_type="Market",
-                                trigger_price=str(passport.sl_price), trigger_direction=trigger_dir,
-                                reduce_only=True
-                            )
-                            new_sl_id = new_sl_res.get("orderId")
-                            if new_sl_id:
-                                passport.add_order_record(new_sl_id, "STOP_SL", "New", passport.sl_price, float(remaining_qty))
-                                passport.add_event("SUCCESS: SL_RESIZED", f"Новый SL выставлен на {remaining_qty} SOL @ {passport.sl_price}")
-                                logger.info(f"🔄 [{passport.passport_id}] SL уменьшен до {remaining_qty} SOL после TP1")
-                            else:
-                                passport.add_event("ERROR: SL_RESIZE_FAILED", "Биржа не вернула orderId для нового SL")
-                                logger.error(f"❌ [{passport.passport_id}] Ошибка ресайза SL: нет orderId")
+                            passport.add_event("ACTION: SL_CANCELLED_FOR_PROTECT", f"Старый SL ({old_sl['order_id']}) отменен для tp2_protect")
+                        
+                        # 2. Рассчитываем буфер и новый уровень защиты
+                        config = getattr(self, 'config', {})
+                        comm_rate = config.get("trading", {}).get("commission_rate", 0.0004)
+                        buffer_mult = config.get("trading", {}).get("tp2_protection_buffer_mult", 3.0)
+                        buffer = passport.entry_price * comm_rate * buffer_mult
+                        
+                        if passport.side == "LONG":
+                            new_sl_price = passport.tp2_price + buffer
+                        else:
+                            new_sl_price = passport.tp2_price - buffer
+                        
+                        # 3. Выставляем новый защитный ордер на ОСТАТОК позиции
+                        trigger_dir = 2 if passport.side == "LONG" else 1
+                        new_sl_res = await self.om.rest.place_order(
+                            category=self.om.category, symbol=passport.symbol,
+                            side="Sell" if passport.side == "LONG" else "Buy",
+                            qty=str(remaining_qty), price="", order_type="Market",
+                            trigger_price=str(new_sl_price), trigger_direction=trigger_dir,
+                            reduce_only=True
+                        )
+                        new_sl_id = new_sl_res.get("orderId")
+                        if new_sl_id:
+                            passport.add_order_record(new_sl_id, "STOP_SL_PROTECT", "New", new_sl_price, float(remaining_qty))
+                            passport.add_event("SUCCESS: TP2_PROTECT_APPLIED", f"Новый SL выставлен на {remaining_qty} SOL @ {new_sl_price:.4f} (TP2 + buffer)")
+                            logger.info(f"🛡️ [{passport.passport_id}] Умный TP2 активирован: SL перенесён на {new_sl_price:.4f}")
+                        else:
+                            passport.add_event("ERROR: TP2_PROTECT_FAILED", "Биржа не вернула orderId для защитного SL")
                 except Exception as e:
-                    # КРИТИЧЕСКИ ВАЖНО: Не даем сбою API убить мониторинг позиции
-                    passport.add_event("ERROR: SL_RESIZE_EXCEPTION", str(e))
-                    logger.error(f"❌ [{passport.passport_id}] Исключение при ресайзе SL: {e}. Позиция может остаться со старым SL или без него.")
+                    passport.add_event("ERROR: TP2_PROTECT_EXCEPTION", str(e))
+                    logger.error(f"❌ [{passport.passport_id}] Исключение при применении tp2_protect: {e}")
 
                 self.storage.save(passport)
 
-                # ✅ ИСПРАВЛЕНИЕ: Переносим SL в безубыток ТОЛЬКО если be_price задан стратегией
-                if passport.be_price is not None:
-                    logger.info(f"🚀 [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. SL → безубыток ({passport.be_price})...")
-                    await self.om.move_sl_to_breakeven(passport, str(passport.be_price))
-                else:
-                    logger.info(f"⚠️ [{passport.passport_id}] TP1! P&L: {tp1_pnl:.2f}. Безубыток ОТКЛЮЧЕН (be_price=null), оставляем структурный SL.")
-            # --- TP2 / SL / SL_BE исполнен → закрытие ---
-            elif order_type in ("LIMIT_TP2", "STOP_SL", "STOP_SL_BE") and status == "Filled":
+            # --- TP2 / SL / SL_PROTECT исполнен → закрытие ---
+            elif order_type in ("LIMIT_TP2", "STOP_SL", "STOP_SL_BE", "STOP_SL_PROTECT") and status == "Filled":
                 self._update_order_status(passport, order_id, "Filled")
                 await self.om.cancel_all_protective_orders(passport)
 
-                exit_qty = passport.position_size / 2.0
+                # Берем реальный исполненный объем из ответа биржи, либо fallback на половину/весь остаток
+                exit_qty = float(order_info.get("cumExecQty", passport.position_size))
+
                 if order_type == "LIMIT_TP2":
-                    reason = CloseReason.TP2.value
+                    reason = "TP2"
                     price = passport.tp2_price
                     leg = "tp2_pnl"
-                elif order_type == "STOP_SL_BE":
-                    reason = CloseReason.BE.value
+                elif order_type in ("STOP_SL_BE", "STOP_SL_PROTECT"):
+                    reason = "TP2_PROTECT" if order_type == "STOP_SL_PROTECT" else "BE"
                     price = float(order_info.get("avgPrice", passport.entry_price)) or passport.entry_price
                     leg = "sl_pnl"
                 else:
-                    reason = CloseReason.SL.value
+                    reason = "SL"
                     price = float(order_info.get("avgPrice", passport.sl_price)) or passport.sl_price
                     leg = "sl_pnl"
 
@@ -367,7 +370,6 @@ class PositionMonitor:
                                    source="UDS")
                 logger.info(f"🏁 [{passport.passport_id}] Закрыта. {reason}, Realized: {passport.realized_pnl:.2f}")
 
-                # TP_FULL_CLOSE -> CLOSED (для TP2) или SL_TRIGGERED -> CLOSED
                 if order_type == "LIMIT_TP2":
                     self._safe_transition(passport, "TP_FULL_CLOSE", reason=reason, source="UDS")
                     self._safe_transition(passport, "CLOSED", reason=reason, source="UDS")
