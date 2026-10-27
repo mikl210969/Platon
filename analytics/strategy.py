@@ -358,10 +358,63 @@ class AdaptiveZoneV1:
     async def _check_return_and_entry(self, zone: AnomalyZone, current_price: float,
                                        current_delta: float, thresholds) -> Optional[Dict[str, Any]]:
         # 1. Возврат к зоне (±0.5%)
-        if not (zone.price * 0.995 <= current_price <= zone.price * 1.005):
+        is_in_zone = zone.price * 0.995 <= current_price <= zone.price * 1.005
+        
+        if not is_in_zone:
+            # ✅ ДИАГНОСТИКА: Логируем состояние зоны КАЖДЫЙ тик, когда она активна и НЕ в зоне
+            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
+            median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
+            median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
+            
+            current_wall = zone.volume
+            expected_wall = wall_mult * (median_bid if zone.side == "LONG" else median_ask)
+            wall_ratio = current_wall / expected_wall if expected_wall > 0 else 0
+            
+            atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
+            dep_threshold = atr_5m * self.config.get("trading.structure_validation.min_retracement_atr_multiplier", 1.5)
+            
+            departure_max_bars = self.config.get("trading.structure_validation.departure_max_bars", 24)
+            max_age_seconds = departure_max_bars * 300
+            zone_age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(zone.timestamp)).total_seconds()
+            age_bars = zone_age_seconds / 300
+            
+            has_departed = False
+            if zone.side == "LONG":
+                has_departed = hasattr(zone, 'min_price_after') and zone.min_price_after is not None
+            else:
+                has_departed = hasattr(zone, 'max_price_after') and zone.max_price_after is not None
+            
+            is_invalidated = zone.state == "INVALIDATED"
+            invalidation_reason = ""
+            if is_invalidated:
+                if zone_age_seconds > max_age_seconds:
+                    invalidation_reason = "departure_timeout"
+                elif not has_departed:
+                    invalidation_reason = "no_retracement_yet"
+                else:
+                    invalidation_reason = "unknown"
+
+            autopsy_logger.info(json.dumps({
+                "event": "ZONE_ANALYSIS", 
+                "zone_id": zone.id,
+                "side": zone.side,
+                "wall_vol": round(current_wall, 2),
+                "median": round(expected_wall / wall_mult, 2),
+                "wall_ratio": round(wall_ratio, 2),
+                "atr5m": round(atr_5m, 4),
+                "dep_threshold": round(dep_threshold, 4),
+                "age_bars": round(age_bars, 1),
+                "max_age_bars": departure_max_bars,
+                "has_departed": has_departed,
+                "is_in_zone": False,
+                "is_invalidated": is_invalidated,
+                "invalidation_reason": invalidation_reason,
+                "current_price": current_price,
+                "zone_price": zone.price
+            }))
             return None
 
-        # ✅ НОВОЕ: Проверка таймаута устаревания зоны (читаем из твоего конфига)
+        # ✅ Проверка таймаута устаревания зоны (читаем из конфига)
         departure_max_bars = self.config.get("trading.structure_validation.departure_max_bars", 24)
         max_age_seconds = departure_max_bars * 300
         zone_age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(zone.timestamp)).total_seconds()
@@ -369,7 +422,7 @@ class AdaptiveZoneV1:
         if zone_age_seconds > max_age_seconds:
             zone.state = "INVALIDATED"
             self._save_zones()
-            logger.info(f"⏳ [{zone.id}] Zone invalidated: departure timeout ({zone_age_seconds/3600:.1f}h > {departure_max_bars} bars)")
+            logger.info(f" [{zone.id}] Zone invalidated: departure timeout ({zone_age_seconds/3600:.1f}h > {departure_max_bars} bars)")
             autopsy_logger.info(json.dumps({
                 "event": "ZONE_INVALIDATED", "zone_id": zone.id, "reason": "departure_timeout",
                 "age_hours": round(zone_age_seconds/3600, 2)
