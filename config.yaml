@@ -20,7 +20,7 @@ trading:
     wall_volume_multiple: 4.0          # Стена должна быть >= 4× медианы за 28 баров
     wall_baseline_bars: 28             # Окно для расчёта медианы объёма
     min_retracement_atr_multiplier: 1.5 # Минимальный откат 1.5 × ATR(5m)
-    departure_max_bars: 24             # Таймаут зоны: 24 бара (2 часа)
+    departure_max_bars: 1440             # Таймаут зоны: 24 бара (2 часа)
     sl_buffer_atr5m: 1.0               # Буфер SL = 1.0 × ATR(5m) от экстремума
     tp1_risk_multiple: 1.5             # TP1 = entry ± (risk_dist × 1.5)
     tp2_risk_multiple: 3.0             # TP2 = entry ± (risk_dist × 3.0)
