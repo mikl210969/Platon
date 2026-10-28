@@ -198,9 +198,17 @@ class AdaptiveZoneV1:
     async def _process_zones(self, current_price: float, bid_wall: float, ask_wall: float, delta_5m: float):
         if self.current_thresholds is None:
             return
+        
         now = datetime.now(timezone.utc)
         thresholds = self.current_thresholds
         zones = self.active_zones
+        
+        # ✅ ЕДИНЫЙ ИСТОЧНИК ИСТИНЫ: читаем коэффициент из конфига
+        wall_quality_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
+        
+        # Рассчитываем единый порог качества для создания зоны
+        quality_threshold_bid = thresholds.wall_threshold * wall_quality_mult
+        quality_threshold_ask = thresholds.wall_threshold * wall_quality_mult
 
         def has_nearby_zone(price: float, side: str, radius_pct: float = 0.5) -> bool:
             for zone in zones:
@@ -213,42 +221,59 @@ class AdaptiveZoneV1:
                     return True
             return False
 
-        min_volume_multiplier = 1.10
-
-        if bid_wall > thresholds.wall_threshold * min_volume_multiplier and not has_nearby_zone(current_price, "LONG"):
+        # ✅ LONG: Создаем зону ТОЛЬКО если стена >= 4x медианы
+        if bid_wall > quality_threshold_bid and not has_nearby_zone(current_price, "LONG"):
             zone_id = f"Z_{now.strftime('%Y%m%d_%H%M')}_LONG"
             zone = AnomalyZone(
-                id=zone_id, price=current_price, volume=bid_wall,
-                timestamp=now.isoformat(), side="LONG",
+                id=zone_id, 
+                price=current_price, 
+                volume=bid_wall,
+                timestamp=now.isoformat(), 
+                side="LONG",
                 candles_buffer=[{"close": current_price, "low": current_price * 0.998, "delta": delta_5m}]
             )
             zones.append(zone)
             self._save_zones()
+            
             autopsy_logger.info(json.dumps({
-                "event": "ZONE_DETECTED", "symbol": self.symbol, "zone_id": zone_id, 
-                "price": current_price, "volume": bid_wall, 
-                "threshold": thresholds.wall_threshold, 
-                "session": thresholds.current_session, "side": "LONG"
+                "event": "ZONE_DETECTED_HIGH_QUALITY", 
+                "symbol": self.symbol, 
+                "zone_id": zone_id, 
+                "price": current_price, 
+                "volume": round(bid_wall, 2), 
+                "threshold_used": round(quality_threshold_bid, 2),
+                "multiplier_applied": wall_quality_mult,
+                "side": "LONG"
             }))
-            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {bid_wall:.0f} > {thresholds.wall_threshold:.0f} | LONG")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED - QUALIFIED] {zone_id} | Vol: {bid_wall:.0f} > {quality_threshold_bid:.0f} ({wall_quality_mult}x Med)")
 
-        if ask_wall > thresholds.wall_threshold * min_volume_multiplier and not has_nearby_zone(current_price, "SHORT"):
+        # ✅ SHORT: Создаем зону ТОЛЬКО если стена >= 4x медианы
+        if ask_wall > quality_threshold_ask and not has_nearby_zone(current_price, "SHORT"):
             zone_id = f"Z_{now.strftime('%Y%m%d_%H%M')}_SHORT"
             zone = AnomalyZone(
-                id=zone_id, price=current_price, volume=ask_wall,
-                timestamp=now.isoformat(), side="SHORT",
+                id=zone_id, 
+                price=current_price, 
+                volume=ask_wall,
+                timestamp=now.isoformat(), 
+                side="SHORT",
                 candles_buffer=[{"close": current_price, "high": current_price * 1.002, "delta": delta_5m}]
             )
             zones.append(zone)
             self._save_zones()
+            
             autopsy_logger.info(json.dumps({
-                "event": "ZONE_DETECTED", "symbol": self.symbol, "zone_id": zone_id, 
-                "price": current_price, "volume": ask_wall, 
-                "threshold": thresholds.wall_threshold, 
-                "session": thresholds.current_session, "side": "SHORT"
+                "event": "ZONE_DETECTED_HIGH_QUALITY", 
+                "symbol": self.symbol, 
+                "zone_id": zone_id, 
+                "price": current_price, 
+                "volume": round(ask_wall, 2), 
+                "threshold_used": round(quality_threshold_ask, 2),
+                "multiplier_applied": wall_quality_mult,
+                "side": "SHORT"
             }))
-            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {ask_wall:.0f} > {thresholds.wall_threshold:.0f} | SHORT")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED - QUALIFIED] {zone_id} | Vol: {ask_wall:.0f} > {quality_threshold_ask:.0f} ({wall_quality_mult}x Med)")
 
+        # Обработка существующих зон (без изменений)
         zones_to_remove = []
         for zone in zones:
             zone.candles_buffer.append({"close": current_price, "delta": delta_5m})
