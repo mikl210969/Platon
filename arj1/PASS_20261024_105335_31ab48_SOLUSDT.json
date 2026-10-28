@@ -1,0 +1,194 @@
+{
+  "passport_id": "PASS_20261024_105335_31ab48",
+  "signal_id": "AdaptiveZoneV1_07163a3d",
+  "strategy": "AdaptiveZoneV1",
+  "signal_source": "AdaptiveZoneV1",
+  "client_order_id": "PLT_31ab48_07163a3d_74431694",
+  "symbol": "SOLUSDT",
+  "side": "LONG",
+  "status": "CLOSED",
+  "entry_price": 101.57,
+  "sl_price": 101.40678,
+  "tp1_price": 101.715,
+  "tp2_price": 101.83,
+  "be_price": null,
+  "planned_size": 10.0,
+  "position_size": 10.0,
+  "filled_qty": 10.0,
+  "fill_price": 101.57,
+  "exchange_verified": true,
+  "target_risk_usdt": 30.0,
+  "actual_risk_usdt": 1.6321999999999548,
+  "cap_applied": true,
+  "orders": [
+    {
+      "order_id": "e0c8249f-7aae-4980-bec6-9c7d02297593",
+      "type": "LIMIT_ENTRY",
+      "status": "Filled",
+      "price": 101.58,
+      "qty": 10.0,
+      "created_at": "2026-10-24T10:53:35.783026+00:00",
+      "client_order_id": "PLT_31ab48_07163a3d_74431694",
+      "updated_at": "2026-10-24T10:53:35.786028+00:00"
+    },
+    {
+      "order_id": "498b13a9-0000-46f6-91de-c232bb91711a",
+      "type": "LIMIT_TP1",
+      "status": "Cancelled",
+      "price": 101.715,
+      "qty": 5.0,
+      "created_at": "2026-10-24T10:53:36.031376+00:00",
+      "updated_at": "2026-10-24T11:28:49.854857+00:00"
+    },
+    {
+      "order_id": "cf653eac-4980-4dfa-bab7-56696e43d7ff",
+      "type": "LIMIT_TP2",
+      "status": "Cancelled",
+      "price": 101.83,
+      "qty": 5.0,
+      "created_at": "2026-10-24T10:53:36.246587+00:00",
+      "updated_at": "2026-10-24T11:28:49.856852+00:00"
+    },
+    {
+      "order_id": "3d121376-26b9-4d21-b073-ec6d91d47510",
+      "type": "STOP_SL",
+      "status": "Filled",
+      "price": 101.40678,
+      "qty": 10.0,
+      "created_at": "2026-10-24T10:53:36.461457+00:00",
+      "updated_at": "2026-10-24T11:28:49.858849+00:00"
+    }
+  ],
+  "created_at": "2026-10-24T10:53:35.349254+00:00",
+  "updated_at": "2026-10-24T11:28:49.858849+00:00",
+  "closed_at": "2026-10-24T11:28:49.858849+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-10-24T10:53:35.349254+00:00",
+      "event": "STATUS: SIGNAL_GENERATED",
+      "details": "adaptive zone signal",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.349254+00:00",
+      "event": "STATUS: ORDER_PREPARING",
+      "details": "building order",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.349254+00:00",
+      "event": "SIGNAL: DETAILS",
+      "details": "SL: 101.40678, TP1: 101.715, TP2: 101.83, BE: None",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.566341+00:00",
+      "event": "ACTION: PLACE_ENTRY",
+      "details": "Размещение LONG 10.0 @ 101.58",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.783026+00:00",
+      "event": "SUCCESS: ORDER_PLACED",
+      "details": "Биржа приняла ордер e0c8249f-7aae-4980-bec6-9c7d02297593",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.784027+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "limit @ 101.58",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.784027+00:00",
+      "event": "ACTION: ENTRY_PLACED",
+      "details": "Лимитный ордер размещен по 101.58",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.786028+00:00",
+      "event": "EXCHANGE: FILLED",
+      "details": "Вход исполнен по 101.57. Комиссия: 0.5586",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.786028+00:00",
+      "event": "EXCHANGE_VERIFIED",
+      "details": "Исполнение подтверждено биржей. order=e0c8249f-7aae-4980-bec6-9c7d02297593, price=101.57, qty=10.0",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.786028+00:00",
+      "event": "STATUS: POSITION_OPEN",
+      "details": "entry filled",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:35.786028+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Защита: SL=101.40678, TP1=101.715, TP2=101.83",
+      "source": "GUARD"
+    },
+    {
+      "timestamp": "2026-10-24T10:53:36.461457+00:00",
+      "event": "SUCCESS: PROTECTIVE_PLACED",
+      "details": "Защитные ордера: TP1=498b13a9-0000-46f6-91de-c232bb91711a, TP2=cf653eac-4980-4dfa-bab7-56696e43d7ff, SL=3d121376-26b9-4d21-b073-ec6d91d47510",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-24T11:28:49.854857+00:00",
+      "event": "EXCHANGE: ORDER_CANCELLED",
+      "details": "Ордер 498b13a9-0000-46f6-91de-c232bb91711a (LIMIT_TP1) отменён биржей",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T11:28:49.856852+00:00",
+      "event": "EXCHANGE: ORDER_CANCELLED",
+      "details": "Ордер cf653eac-4980-4dfa-bab7-56696e43d7ff (LIMIT_TP2) отменён биржей",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T11:28:49.858849+00:00",
+      "event": "EXCHANGE: CLOSED",
+      "details": "Причина: SL, Gross: -0.85, Comm: 1.1163, Realized: -1.97",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T11:28:49.858849+00:00",
+      "event": "STATUS: SL_TRIGGERED",
+      "details": "SL",
+      "source": "UDS"
+    },
+    {
+      "timestamp": "2026-10-24T11:28:49.858849+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL",
+      "source": "UDS"
+    }
+  ],
+  "exit_reason": "SL",
+  "exit_price": 101.4,
+  "gross_pnl": -0.8499999999999375,
+  "commission": 1.1163349999999999,
+  "realized_pnl": -1.9663349999999373,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": -0.8499999999999375,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "Режим по умолчанию (аналитика не подключена)",
+    "btc_trend": "UNKNOWN",
+    "btc_regime": "UNKNOWN",
+    "base_sl_distance": 0.1901771653543274,
+    "adjusted_sl_distance": 0.5,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Базовый SL (×1.0)",
+    "symbol_delta": 0.0,
+    "sl_distance": 0.1901771653543274,
+    "final_quantity": 10.0,
+    "max_size_cap": 10.0,
+    "fallback_used": false
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "passport_id": "PASS_20261025_114443_1c7425",
+  "signal_id": "AdaptiveZoneV1_85808940",
+  "strategy": "AdaptiveZoneV1",
+  "signal_source": "AdaptiveZoneV1",
+  "client_order_id": "PLT_1c7425_85808940_0795f41c",
+  "symbol": "SOLUSDT",
+  "side": "SHORT",
+  "status": "ERROR_STATE",
+  "entry_price": 101.11,
+  "sl_price": 101.61554999999998,
+  "tp1_price": 100.985,
+  "tp2_price": 100.86,
+  "be_price": null,
+  "planned_size": 10.0,
+  "position_size": 10.0,
+  "filled_qty": 0.0,
+  "fill_price": 101.11,
+  "exchange_verified": false,
+  "target_risk_usdt": 30.0,
+  "actual_risk_usdt": 0.0,
+  "cap_applied": false,
+  "orders": [
+    {
+      "order_id": "c51025ac-d6fa-4073-a621-4c933c7f4816",
+      "type": "LIMIT_ENTRY",
+      "status": "Cancelled",
+      "price": 101.13,
+      "qty": 10.0,
+      "created_at": "2026-10-25T11:44:44.100979+00:00",
+      "client_order_id": "PLT_1c7425_85808940_0795f41c",
+      "updated_at": "2026-10-25T11:46:44.557050+00:00"
+    }
+  ],
+  "created_at": "2026-10-25T11:44:43.665977+00:00",
+  "updated_at": "2026-10-25T11:46:44.557050+00:00",
+  "closed_at": "2026-10-25T11:44:44.028977+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-10-25T11:44:43.665977+00:00",
+      "event": "STATUS: SIGNAL_GENERATED",
+      "details": "adaptive zone signal",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:43.666979+00:00",
+      "event": "STATUS: ORDER_PREPARING",
+      "details": "building order",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:43.666979+00:00",
+      "event": "SIGNAL: DETAILS",
+      "details": "SL: 101.61554999999998, TP1: 100.985, TP2: 100.86, BE: None",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:43.885980+00:00",
+      "event": "ACTION: PLACE_ENTRY",
+      "details": "Размещение SHORT 10.0 @ 101.13",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:44.028977+00:00",
+      "event": "RECON: FINALIZED",
+      "details": "Паспорт финализирован по истории. closedPnl=1.3222225, fee=0.0",
+      "source": "RECON"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:44.028977+00:00",
+      "event": "STATUS: ERROR_STATE",
+      "details": "RECON:PERIODIC",
+      "source": "RECON"
+    },
+    {
+      "timestamp": "2026-10-25T11:44:44.100979+00:00",
+      "event": "SUCCESS: ORDER_PLACED",
+      "details": "Биржа приняла ордер c51025ac-d6fa-4073-a621-4c933c7f4816",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-25T11:46:44.557050+00:00",
+      "event": "EXCHANGE: ORDER_CANCELLED",
+      "details": "Ордер c51025ac-d6fa-4073-a621-4c933c7f4816 (LIMIT_ENTRY) отменён биржей",
+      "source": "UDS"
+    }
+  ],
+  "exit_reason": "RECON_FLAT",
+  "exit_price": 100.65,
+  "gross_pnl": 1.3222225,
+  "commission": 0.0,
+  "realized_pnl": 1.3222225,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": 0.0,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "Режим по умолчанию (аналитика не подключена)",
+    "btc_trend": "UNKNOWN",
+    "btc_regime": "UNKNOWN",
+    "base_sl_distance": 0.49999999999998546,
+    "adjusted_sl_distance": 0.5,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Базовый SL (×1.0)",
+    "symbol_delta": 0.0,
+    "sl_distance": 0.49999999999998546,
+    "final_quantity": 10.0,
+    "max_size_cap": 10.0,
+    "fallback_used": false
+  }
+}

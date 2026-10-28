@@ -1,0 +1,119 @@
+{
+  "passport_id": "PASS_20261024_121803_462d37",
+  "signal_id": "AdaptiveZoneV1_f3c40028",
+  "strategy": "AdaptiveZoneV1",
+  "signal_source": "AdaptiveZoneV1",
+  "client_order_id": "PLT_462d37_f3c40028_ad9088bd",
+  "symbol": "SOLUSDT",
+  "side": "SHORT",
+  "status": "ORDER_CANCELLED",
+  "entry_price": 101.62,
+  "sl_price": 101.81322,
+  "tp1_price": 101.535,
+  "tp2_price": 101.45,
+  "be_price": null,
+  "planned_size": 10.0,
+  "position_size": 10.0,
+  "filled_qty": 0.0,
+  "fill_price": 101.62,
+  "exchange_verified": false,
+  "target_risk_usdt": 30.0,
+  "actual_risk_usdt": 0.0,
+  "cap_applied": false,
+  "orders": [
+    {
+      "order_id": "7b401b7d-38ed-4e6e-aaaf-7954cc2626fc",
+      "type": "LIMIT_ENTRY",
+      "status": "Cancelled",
+      "price": 101.64,
+      "qty": 10.0,
+      "created_at": "2026-10-24T12:18:04.116520+00:00",
+      "client_order_id": "PLT_462d37_f3c40028_ad9088bd",
+      "updated_at": "2026-10-24T12:18:34.616998+00:00"
+    }
+  ],
+  "created_at": "2026-10-24T12:18:03.676418+00:00",
+  "updated_at": "2026-10-24T12:18:34.616998+00:00",
+  "closed_at": "2026-10-24T12:18:34.616998+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-10-24T12:18:03.676418+00:00",
+      "event": "STATUS: SIGNAL_GENERATED",
+      "details": "adaptive zone signal",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:03.676418+00:00",
+      "event": "STATUS: ORDER_PREPARING",
+      "details": "building order",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:03.676418+00:00",
+      "event": "SIGNAL: DETAILS",
+      "details": "SL: 101.81322, TP1: 101.535, TP2: 101.45, BE: None",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:03.896725+00:00",
+      "event": "ACTION: PLACE_ENTRY",
+      "details": "Размещение SHORT 10.0 @ 101.64",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:04.116520+00:00",
+      "event": "SUCCESS: ORDER_PLACED",
+      "details": "Биржа приняла ордер 7b401b7d-38ed-4e6e-aaaf-7954cc2626fc",
+      "source": "SYSTEM"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:04.117516+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "limit @ 101.64",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:04.117516+00:00",
+      "event": "ACTION: ENTRY_PLACED",
+      "details": "Лимитный ордер размещен по 101.64",
+      "source": "STRATEGY"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:34.616998+00:00",
+      "event": "TIMER: CANCELLED",
+      "details": "Ордер 7b401b7d-38ed-4e6e-aaaf-7954cc2626fc отменён таймером. Объём: 10.0",
+      "source": "TIMER"
+    },
+    {
+      "timestamp": "2026-10-24T12:18:34.616998+00:00",
+      "event": "STATUS: ORDER_CANCELLED",
+      "details": "TTL expired, no fill",
+      "source": "TIMER"
+    }
+  ],
+  "exit_reason": "",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "realized_pnl": 0.0,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": 0.0,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "Режим по умолчанию (аналитика не подключена)",
+    "btc_trend": "UNKNOWN",
+    "btc_regime": "UNKNOWN",
+    "base_sl_distance": 0.19013973627238398,
+    "adjusted_sl_distance": 0.5,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Базовый SL (×1.0)",
+    "symbol_delta": 0.0,
+    "sl_distance": 0.19013973627238398,
+    "final_quantity": 10.0,
+    "max_size_cap": 10.0,
+    "fallback_used": false
+  }
+}

@@ -1,6 +1,7 @@
 """
 Statistics Engine (EMA версия + Медиана объёма стен).
 Расчет динамических порогов на основе экспоненциального сглаживания по сессиям.
+✅ МУЛЬТИВАЛЮТНОСТЬ: Изоляция статистики по символам.
 """
 
 import logging
@@ -37,12 +38,16 @@ class DynamicThresholds:
 
 
 class StatisticsEngine:
-    def __init__(self, event_bus: EventBus, window_size: int = 100, min_observations: int = 60, timezone_offset_hours: float = 0.0, wall_baseline_bars: int = 28):
+    def __init__(self, event_bus: EventBus, window_size: int = 100, min_observations: int = 60, 
+                 timezone_offset_hours: float = 0.0, wall_baseline_bars: int = 28, 
+                 symbol: str = "UNKNOWN"):  # ✅ ДОБАВЛЕН ПАРАМЕТР SYMBOL
+        
         self.bus = event_bus
         self.window_size = window_size
         self.min_obs = min_observations
         self.tz_offset = timedelta(hours=timezone_offset_hours)
         self.wall_baseline_bars = wall_baseline_bars
+        self.symbol = symbol  # ✅ СОХРАНЯЕМ СИМВОЛ ДЛЯ ИЗОЛЯЦИИ
         
         # EMA коэффициенты
         self.alpha_wall = 0.15
@@ -73,8 +78,9 @@ class StatisticsEngine:
             SessionConfig("american", 13, 21, k_wall=1.2, k_delta=2.0, k_atr=3.0),
         ]
         
-        self.bus.subscribe("MARKET:SNAPSHOT", self._on_snapshot)
-        logger.info(f"📊 StatisticsEngine инициализирован (EMA + Median {wall_baseline_bars} bars).")
+        # ✅ ИЗМЕНЕНО: Подписка на изолированный топик конкретного символа
+        self.bus.subscribe(f"MARKET:SNAPSHOT:{self.symbol}", self._on_snapshot)
+        logger.info(f"📊 [{self.symbol}] StatisticsEngine инициализирован (EMA + Median {wall_baseline_bars} bars).")
 
     def _get_current_session(self, dt: datetime) -> SessionConfig:
         utc_dt = dt - self.tz_offset
@@ -147,7 +153,8 @@ class StatisticsEngine:
         
         if self._obs_count >= self.min_obs and not self._is_ready:
             self._is_ready = True
-            logger.info(f"✅ StatisticsEngine готов (наблюдений: {self._obs_count})")
+            # ✅ ДОБАВЛЕН СИМВОЛ В ЛОГ ГОТОВНОСТИ
+            logger.info(f"✅ [{self.symbol}] StatisticsEngine готов (наблюдений: {self._obs_count})")
 
     def get_thresholds(self, current_time: datetime) -> Optional[DynamicThresholds]:
         if not self._is_ready:

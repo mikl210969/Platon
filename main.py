@@ -239,7 +239,17 @@ async def main():
         from analytics.strategy import AdaptiveZoneV1
 
         shadow_mode = config.get("system.shadow_mode", True)
-        stats_engine = StatisticsEngine(event_bus=bus, window_size=100, min_observations=60)
+        
+        # ✅ ОТДЕЛЬНЫЙ STATISTICS ENGINE ДЛЯ КАЖДОГО СИМВОЛА
+        stats_engines = {}
+        for symbol in active_symbols:
+            stats_engine = StatisticsEngine(
+                event_bus=bus, 
+                window_size=100, 
+                min_observations=60,
+                symbol=symbol  # ← Передаем символ
+            )
+            stats_engines[symbol] = stats_engine
         
         strategies = {}
         for symbol in active_symbols:
@@ -251,7 +261,7 @@ async def main():
                 position_monitor=monitor,
                 shadow_mode=shadow_mode,
                 config=config,
-                symbol=symbol  # ← Передаем символ в стратегию для изоляции зон
+                symbol=symbol
             )
             strategies[symbol] = strategy
             

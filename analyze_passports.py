@@ -1,214 +1,164 @@
 """
-PLATO Passport Analytics Dashboard v1.0
-Анализирует закрытые сделки из папки passports/ и выводит статистику 
-по эффективности адаптивных механизмов (Smart Sizing, Adaptive SL, Regime).
+Анализатор паспортов PLATO V2.
+Запуск: python analyze_passports.py
 """
 
-import os
 import json
-import glob
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
-# Настройки
-PASSPORTS_DIR = "data.passports"
+PASSPORTS_DIR = Path("data/passports")
 
-def load_closed_passports():
-    """Загружает все паспорта со статусом CLOSED."""
-    files = glob.glob(os.path.join(PASSPORTS_DIR, "*.json"))
-    trades = []
+def load_passports():
+    passports = []
+    if not PASSPORTS_DIR.exists():
+        print(f"❌ Директория {PASSPORTS_DIR} не найдена!")
+        return passports
     
-    for file in files:
+    for file in sorted(PASSPORTS_DIR.glob("*.json")):
         try:
             with open(file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if data.get("status") == "CLOSED":
-                    trades.append(data)
+                passports.append(json.load(f))
         except Exception as e:
-            print(f"⚠️ Ошибка чтения {file}: {e}")
-            
-    return trades
+            print(f"️ Ошибка чтения {file}: {e}")
+    return passports
 
-def calculate_pnl(trade):
-    """Вычисляет PnL, если он не указан явно."""
-    pnl = trade.get('gross_pnl') or trade.get('realized_pnl')
-    if pnl is not None:
-        return float(pnl)
-    
-    # Fallback расчет
-    entry = trade.get('entry_price', 0)
-    exit_price = trade.get('exit_price', 0)
-    qty = trade.get('final_quantity', 0) or trade.get('sizing_info', {}).get('final_quantity', 0)
-    side = trade.get('side', 'long')
-    
-    if entry and exit_price and qty:
-        multiplier = 1 if side == 'long' else -1
-        return float(qty * (exit_price - entry) * multiplier)
-    return 0.0
-
-def analyze(trades):
-    """Агрегирует статистику."""
-    stats = {
-        'total_trades': len(trades),
-        'wins': 0,
-        'losses': 0,
-        'breakeven': 0,
-        'total_pnl': 0.0,
-        'by_strategy': defaultdict(lambda: {'trades': 0, 'wins': 0, 'pnl': 0.0}),
-        'by_smart_mult': defaultdict(lambda: {'trades': 0, 'wins': 0, 'pnl': 0.0}),
-        'by_sl_mult': defaultdict(lambda: {'trades': 0, 'wins': 0, 'pnl': 0.0, 'sl_hits': 0}),
-        'by_btc_trend': defaultdict(lambda: {'trades': 0, 'wins': 0, 'pnl': 0.0}),
-        'by_exit_reason': defaultdict(int)
-    }
-
-    for t in trades:
-        pnl = calculate_pnl(t)
-        stats['total_pnl'] += pnl
-        
-        if pnl > 0.01:
-            stats['wins'] += 1
-            is_win = True
-        elif pnl < -0.01:
-            stats['losses'] += 1
-            is_win = False
-        else:
-            stats['breakeven'] += 1
-            is_win = False # Считаем безубыток как "не прибыль" для консервативной статистики
-
-        strategy = t.get('strategy', 'Unknown')
-        sizing = t.get('sizing_info', {})
-        smart_mult = sizing.get('smart_multiplier', 1.0)
-        sl_mult = sizing.get('sl_multiplier', 1.0)
-        btc_trend = sizing.get('btc_trend', 'UNKNOWN')
-        exit_reason = t.get('exit_reason', 'UNKNOWN')
-
-        # 1. По стратегиям
-        stats['by_strategy'][strategy]['trades'] += 1
-        if is_win: stats['by_strategy'][strategy]['wins'] += 1
-        stats['by_strategy'][strategy]['pnl'] += pnl
-
-        # 2. По Smart Sizing
-        stats['by_smart_mult'][smart_mult]['trades'] += 1
-        if is_win: stats['by_smart_mult'][smart_mult]['wins'] += 1
-        stats['by_smart_mult'][smart_mult]['pnl'] += pnl
-
-        # 3. По Adaptive SL
-        stats['by_sl_mult'][sl_mult]['trades'] += 1
-        if is_win: stats['by_sl_mult'][sl_mult]['wins'] += 1
-        stats['by_sl_mult'][sl_mult]['pnl'] += pnl
-        if exit_reason == 'SL_HIT':
-            stats['by_sl_mult'][sl_mult]['sl_hits'] += 1
-
-        # 4. По тренду BTC
-        stats['by_btc_trend'][btc_trend]['trades'] += 1
-        if is_win: stats['by_btc_trend'][btc_trend]['wins'] += 1
-        stats['by_btc_trend'][btc_trend]['pnl'] += pnl
-
-        # 5. Причины выхода
-        stats['by_exit_reason'][exit_reason] += 1
-
-    return stats
-
-def print_dashboard(stats, trades):
-    """Выводит красивый текстовый отчет."""
-    print("\n" + "="*70)
-    print(" 🚀 PLATO TRADING ANALYTICS DASHBOARD v1.1")
-    print(f" 📅 Отчет сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70)
-
-    total = stats['total_trades']
-    if total == 0:
-        print("\n⚠️ Закрытых сделок (статус CLOSED) пока нет. Запустите платформу и подождите сигналов.")
+def analyze(passports):
+    if not passports:
+        print(" Паспортов не найдено.")
         return
-
-    win_rate = (stats['wins'] / total) * 100
-    avg_pnl = stats['total_pnl'] / total
     
-    print(f"\n📊 ОБЩАЯ СТАТИСТИКА")
-    print(f"   Всего сделок:      {total}")
-    print(f"   Прибыльных:        {stats['wins']} ({win_rate:.1f}%)")
-    print(f"   Убыточных:         {stats['losses']}")
-    print(f"   Безубыточных:      {stats['breakeven']}")
-    print(f"   Общий PnL:         {stats['total_pnl']:+.2f} USDT")
-    print(f"   Средний PnL/сделку:{avg_pnl:+.2f} USDT")
-
-    print(f"\n📈 ЭФФЕКТИВНОСТЬ ПО СТРАТЕГИЯМ")
-    print(f"   {'Стратегия':<20} | {'Сделок':<6} | {'Win Rate':<8} | {'PnL (USDT)':<10}")
-    print("-" * 55)
-    for strat, data in sorted(stats['by_strategy'].items(), key=lambda x: x[1]['pnl'], reverse=True):
-        wr = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
-        print(f"   {strat:<20} | {data['trades']:<6} | {wr:>5.1f}%   | {data['pnl']:>+9.2f}")
-
-    print(f"\n💰 ЭФФЕКТИВНОСТЬ SMART SIZING (Множитель риска)")
-    print(f"   {'Множитель':<12} | {'Сделок':<6} | {'Win Rate':<8} | {'PnL (USDT)':<10} | {'Гипотеза'}")
-    print("-" * 65)
-    for mult in sorted(stats['by_smart_mult'].keys()):
-        data = stats['by_smart_mult'][mult]
-        wr = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
-        
-        if mult == 1.5: hypothesis = "Подтверждение (ожидаем высокий PnL)"
-        elif mult == 0.5: hypothesis = "Контртренд (ожидаем низкий риск)"
-        elif mult == 0.7: hypothesis = "IMPULSIVE (защита от ножей)"
-        else: hypothesis = "Нейтрально"
-            
-        print(f"   ×{mult:<10} | {data['trades']:<6} | {wr:>5.1f}%   | {data['pnl']:>+9.2f} | {hypothesis}")
-
-    print(f"\n🎯 ЭФФЕКТИВНОСТЬ ADAPTIVE SL (Множитель ширины стопа)")
-    print(f"   {'Множитель':<12} | {'Сделок':<6} | {'Win Rate':<8} | {'SL Hits':<7} | {'PnL (USDT)'}")
-    print("-" * 60)
-    for mult in sorted(stats['by_sl_mult'].keys()):
-        data = stats['by_sl_mult'][mult]
-        wr = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
-        sl_rate = (data['sl_hits'] / data['trades'] * 100) if data['trades'] > 0 else 0
-        
-        if mult == 0.6: desc = "Узкий (сильная дельта)"
-        elif mult == 1.4: desc = "Широкий (слабая дельта)"
-        else: desc = "Базовый"
-            
-        print(f"   ×{mult:<10} | {data['trades']:<6} | {wr:>5.1f}%   | {data['sl_hits']:<4} ({sl_rate:>4.1f}%) | {data['pnl']:>+9.2f}  {desc}")
-
-    print(f"\n🌪️ ВЛИЯНИЕ РЕЖИМА BTC (Trend на момент входа)")
-    print(f"   {'Тренд BTC':<12} | {'Сделок':<6} | {'Win Rate':<8} | {'PnL (USDT)'}")
-    print("-" * 45)
-    for trend, data in stats['by_btc_trend'].items():
-        wr = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
-        print(f"   {trend:<12} | {data['trades']:<6} | {wr:>5.1f}%   | {data['pnl']:>+9.2f}")
-
-    print(f"\n🚪 ПРИЧИНЫ ЗАКРЫТИЯ ПОЗИЦИЙ")
-    for reason, count in sorted(stats['by_exit_reason'].items(), key=lambda x: x[1], reverse=True):
-        pct = (count / total) * 100
-        print(f"   • {reason:<20} : {count} ({pct:.1f}%)")
-
-    # 🔥 НОВОЕ: Секция проблемных сделок
-    problem_trades = [
-        t for t in trades 
-        if t.get('exit_reason') in ('EXTERNAL_CLOSE', 'UNKNOWN') or 
-           t.get('sizing_info', {}).get('btc_trend') == 'UNKNOWN'
-    ]
+    closed = [p for p in passports if p.get("status") in ("CLOSED", "ERROR_STATE")]
+    cancelled = [p for p in passports if p.get("status") == "ORDER_CANCELLED"]
+    open_trades = [p for p in passports if p.get("status") == "POSITION_OPEN"]
     
-    if problem_trades:
-        print(f"\n⚠️ ПРОБЛЕМНЫЕ СДЕЛКИ (требуют проверки) — {len(problem_trades)} шт.")
-        print(f"   {'#':<3} | {'Passport ID':<35} | {'Exit Reason':<15} | {'BTC Trend':<10} | {'PnL':>8}")
-        print("   " + "-" * 85)
-        for i, t in enumerate(problem_trades[:10], 1):  # Показываем максимум 10
-            passport_id = t.get('passport_id', 'N/A')[:35]
-            exit_reason = t.get('exit_reason', 'N/A')
-            btc_trend = t.get('sizing_info', {}).get('btc_trend', 'N/A')
-            pnl = calculate_pnl(t)
-            print(f"   {i:<3} | {passport_id:<35} | {exit_reason:<15} | {btc_trend:<10} | {pnl:>+8.2f}")
+    print("=" * 80)
+    print(f"📊 АНАЛИЗ ПАСПОРТОВ PLATO V2 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("=" * 80)
+    print(f"📁 Всего паспортов: {len(passports)}")
+    print(f"✅ Закрытых сделок: {len(closed)}")
+    print(f"⏳ Отмененных ордеров: {len(cancelled)}")
+    print(f"🔓 Открытых позиций: {len(open_trades)}")
+    print()
+    
+    if not closed:
+        print("⚠️ Нет закрытых сделок для анализа.")
+        return
+    
+    # === ОБЩИЕ МЕТРИКИ ===
+    wins = [p for p in closed if p.get("realized_pnl", 0) > 0]
+    losses = [p for p in closed if p.get("realized_pnl", 0) < 0]
+    breakeven = [p for p in closed if p.get("realized_pnl", 0) == 0]
+    
+    total_pnl = sum(p.get("realized_pnl", 0) for p in closed)
+    gross_profit = sum(p.get("realized_pnl", 0) for p in wins)
+    gross_loss = abs(sum(p.get("realized_pnl", 0) for p in losses))
+    total_commission = sum(p.get("commission", 0) for p in closed)
+    
+    win_rate = (len(wins) / len(closed) * 100) if closed else 0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+    
+    print("📈 ОБЩИЕ МЕТРИКИ")
+    print("-" * 80)
+    print(f"  Net P&L:              {total_pnl:+.2f} USDT")
+    print(f"  Gross Profit:         {gross_profit:+.2f} USDT")
+    print(f"  Gross Loss:           -{gross_loss:.2f} USDT")
+    print(f"  Total Commission:     -{total_commission:.2f} USDT")
+    print(f"  Win Rate:             {win_rate:.1f}% ({len(wins)}/{len(closed)})")
+    print(f"  Profit Factor:        {profit_factor:.2f}")
+    print(f"  Break-even trades:    {len(breakeven)}")
+    print()
+    
+    # === РАЗБИВКА ПО EXIT_REASON ===
+    print("🎯 РАЗБИВКА ПО ПРИЧИНЕ ВЫХОДА")
+    print("-" * 80)
+    exit_stats = defaultdict(lambda: {"count": 0, "pnl": 0.0, "wins": 0})
+    for p in closed:
+        reason = p.get("exit_reason") or "UNKNOWN"
+        pnl = p.get("realized_pnl", 0)
+        exit_stats[reason]["count"] += 1
+        exit_stats[reason]["pnl"] += pnl
+        if pnl > 0:
+            exit_stats[reason]["wins"] += 1
+    
+    for reason, stats in sorted(exit_stats.items(), key=lambda x: -x[1]["pnl"]):
+        wr = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0
+        print(f"  {reason:<15} | Сделок: {stats['count']:<3} | Win: {wr:.0f}% | P&L: {stats['pnl']:+.2f} USDT")
+    print()
+    
+    # === АНОМАЛИИ ===
+    print("⚠️  АНОМАЛИИ (требуют проверки)")
+    print("-" * 80)
+    anomalies = []
+    
+    for p in closed:
+        issues = []
         
-        if len(problem_trades) > 10:
-            print(f"   ... и ещё {len(problem_trades) - 10} сделок")
+        # 1. Закрытие по BE
+        if p.get("exit_reason") == "BE":
+            issues.append("Закрытие по BE")
+        
+        # 2. ERROR_STATE
+        if p.get("status") == "ERROR_STATE":
+            issues.append(f"Статус ERROR_STATE")
+        
+        # 3. Выход по TP с убытком
+        if p.get("exit_reason") in ("TP1", "TP2") and p.get("realized_pnl", 0) < 0:
+            issues.append(f"Выход по {p.get('exit_reason')} с убытком")
+        
+        # 4. SL ниже entry для SHORT (баг!)
+        if p.get("side") == "SHORT" and p.get("sl_price", 0) < p.get("entry_price", 0):
+            issues.append(f"SL ({p.get('sl_price')}) НИЖЕ entry ({p.get('entry_price')}) для SHORT!")
+        
+        # 5. SL выше entry для LONG (баг!)
+        if p.get("side") == "LONG" and p.get("sl_price", 0) > p.get("entry_price", 0):
+            issues.append(f"SL ({p.get('sl_price')}) ВЫШЕ entry ({p.get('entry_price')}) для LONG!")
+        
+        # 6. Ошибка защиты
+        timeline_str = json.dumps(p.get("timeline", []))
+        if "PROTECTIVE_FAILED" in timeline_str:
+            issues.append("Ошибка выставления защиты (PROTECTIVE_FAILED)")
+        
+        if issues:
+            anomalies.append({
+                "passport": p["passport_id"],
+                "side": p.get("side", "?"),
+                "entry": p.get("entry_price", 0),
+                "sl": p.get("sl_price", 0),
+                "pnl": p.get("realized_pnl", 0),
+                "exit": p.get("exit_reason", "?"),
+                "issues": ", ".join(issues),
+                "created_at": p.get("created_at", "")
+            })
+    
+    if anomalies:
+        for a in anomalies:
+            print(f"  [{a['passport']}] {a['side']} @ {a['entry']}")
+            print(f"    SL: {a['sl']} | Exit: {a['exit']} | P&L: {a['pnl']:+.2f}$")
+            print(f"    ️  {a['issues']}")
+            print(f"    📅 {a['created_at']}")
+            print()
     else:
-        print(f"\n✅ Проблемных сделок не обнаружено. Все данные корректны.")
-
-    print("\n" + "="*70)
-    print(" 💡 СОВЕТ: Если Win Rate при ×0.5 (контртренд) низкий, но PnL близок к 0,")
-    print("    значит, Smart Sizing успешно спасает депозит от больших убытков!")
-    print("="*70 + "\n")
+        print("  ✅ Аномалий не обнаружено.")
+    print()
+    
+    # === ПОСЛЕДНИЕ 10 СДЕЛОК ===
+    print("🕐 ПОСЛЕДНИЕ 10 СДЕЛОК")
+    print("-" * 80)
+    for p in sorted(closed, key=lambda x: x.get("closed_at", ""), reverse=True)[:10]:
+        side = p.get("side", "?")
+        pnl = p.get("realized_pnl", 0)
+        reason = p.get("exit_reason", "?")
+        entry = p.get("entry_price", 0)
+        exit_p = p.get("exit_price", 0)
+        sl = p.get("sl_price", 0)
+        print(f"  {side:<5} | Entry: {entry:<8} | SL: {sl:<8} | Exit: {exit_p:<8} | {reason:<10} | P&L: {pnl:+.2f} USDT")
+    print()
+    
+    print("=" * 80)
+    print("✅ Анализ завершен.")
 
 if __name__ == "__main__":
-    print("🔍 Сканирование папки passports/...")
-    trades = load_closed_passports()
-    stats = analyze(trades)
-    print_dashboard(stats, trades)  # 🔥 Передаём trades для вывода проблемных сделок
+    passports = load_passports()
+    analyze(passports)

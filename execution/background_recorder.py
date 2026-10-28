@@ -12,7 +12,7 @@ SYMBOLS = [
     "BNBUSDT", "XRPUSDT", "LINKUSDT", "AVAXUSDT"
 ]
 
-BASE_OUTPUT_DIR = r"C:\Users\ongul\YandexDisk\data_new"
+BASE_OUTPUT_DIR = r"C:\Users\user\YandexDisk\data21"
 WS_URL_SPOT = "wss://stream.bybit.com/v5/public/spot" # Или linear, если фьючерсы
 FLUSH_INTERVAL_SEC = 5  
 
