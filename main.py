@@ -202,7 +202,8 @@ async def main():
 
         logger.info("🔄 Проверка наличия открытых позиций...")
         try:
-            positions = await rest._request("GET", "/v5/position/list", {"category": "linear"}, signed=True)
+            # ✅ ИСПРАВЛЕНО: Bybit требует symbol или settleCoin при запросе списка позиций
+            positions = await rest._request("GET", "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}, signed=True)
             for pos in positions.get("list", []):
                 sym = pos.get("symbol")
                 if sym in active_symbols and float(pos.get("size", 0)) > 0:
