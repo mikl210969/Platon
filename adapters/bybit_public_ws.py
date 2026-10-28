@@ -1,6 +1,7 @@
 """
 Bybit Public WebSocket Client.
 Подключается к публичным топикам (стакан, трейды, свечи) без API-ключей.
+✅ ИСПРАВЛЕНО: Полная изоляция EventBus по символу при публикации.
 """
 
 import asyncio
@@ -37,11 +38,11 @@ class BybitPublicWSClient:
             try:
                 async with session.ws_connect(self.ws_url) as ws:
                     self.ws = ws
-                    logger.info("📡 [PublicWS] Подключено к публичному WS")
+                    logger.info(f"📡 [{self.symbol}] [PublicWS] Подключено к публичному WS")
                     
                     sub_msg = {"op": "subscribe", "args": self.topics}
                     await ws.send_json(sub_msg)
-                    logger.info(f"📡 [PublicWS] Подписка: {self.topics}")
+                    logger.info(f"📡 [{self.symbol}] [PublicWS] Подписка: {self.topics}")
                     
                     ping_task = asyncio.create_task(self._ping_loop(ws))
                     
@@ -55,16 +56,16 @@ class BybitPublicWSClient:
                                 if not payload:
                                     continue
                                 
+                                # ✅ ИСПРАВЛЕНО: Публикация в изолированные топики
                                 if topic.startswith("orderbook"):
-                                    # ✅ ПЕРЕДАЁМ ТИП СООБЩЕНИЯ (snapshot/delta)
-                                    await self.bus.publish("PUBLIC:ORDERBOOK", {
+                                    await self.bus.publish(f"PUBLIC:ORDERBOOK:{self.symbol}", {
                                         "type": data.get("type", "snapshot"),
                                         "data": payload
                                     })
                                 elif topic.startswith("publicTrade"):
-                                    await self.bus.publish("PUBLIC:TRADES", payload)
+                                    await self.bus.publish(f"PUBLIC:TRADES:{self.symbol}", payload)
                                 elif topic.startswith("kline"):
-                                    await self.bus.publish("PUBLIC:KLINE", {"topic": topic, "data": payload})
+                                    await self.bus.publish(f"PUBLIC:KLINE:{self.symbol}", {"topic": topic, "data": payload})
                                     
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
@@ -72,7 +73,7 @@ class BybitPublicWSClient:
                         ping_task.cancel()
                         
             except Exception as e:
-                logger.warning(f"⚠️ [PublicWS] Ошибка соединения: {e}. Переподключение через 5 сек...")
+                logger.warning(f"⚠️ [{self.symbol}] [PublicWS] Ошибка соединения: {e}. Переподключение через 5 сек...")
                 await asyncio.sleep(5)
 
     async def _ping_loop(self, ws):
@@ -83,7 +84,7 @@ class BybitPublicWSClient:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"❌ [PublicWS] Ошибка ping: {e}")
+            logger.error(f"❌ [{self.symbol}] [PublicWS] Ошибка ping: {e}")
 
     async def stop(self):
         self._running = False

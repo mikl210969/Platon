@@ -1,7 +1,7 @@
 """
 Аналитический агрегатор рыночных данных.
 Собирает стакан, трейды, свечи → выдаёт снапшот Features раз в секунду.
-V2: Добавлен независимый расчет ATR(14) по 5-минутным свечам.
+✅ ИСПРАВЛЕНО: Полная изоляция EventBus по символу.
 """
 
 import asyncio
@@ -199,13 +199,14 @@ class MarketBuffer:
         self.orderbook = OrderbookAnalyzer(min_wall_size=100.0)
         self.delta = DeltaCalculator()
         self.atr = ATRCalculator(period=14)
-        self.atr_5m = ATRCalculator(period=14)  # ✅ V2: Отдельный калькулятор для 5m
+        self.atr_5m = ATRCalculator(period=14)
         self.volume_profile = VolumeProfile(bucket_size=0.1, max_age_seconds=3600 * 4)
         self.current_price: float = 0.0
         
-        self.bus.subscribe("PUBLIC:ORDERBOOK", self._on_orderbook)
-        self.bus.subscribe("PUBLIC:TRADES", self._on_trades)
-        self.bus.subscribe("PUBLIC:KLINE", self._on_kline)
+        # ✅ ИСПРАВЛЕНО: Изоляция подписок по символу
+        self.bus.subscribe(f"PUBLIC:ORDERBOOK:{self.symbol}", self._on_orderbook)
+        self.bus.subscribe(f"PUBLIC:TRADES:{self.symbol}", self._on_trades)
+        self.bus.subscribe(f"PUBLIC:KLINE:{self.symbol}", self._on_kline)
         
         self._snapshot_task = None
         self._trades_count = self._ob_updates = self._klines_count = 0
@@ -213,7 +214,6 @@ class MarketBuffer:
     async def bootstrap_atr(self, rest, category: str, symbol: str):
         """✅ ЕДИНСТВЕННЫЙ REST-ЗАПРОС ДЛЯ РЫНКА: загрузка истории при старте."""
         try:
-            # 1. Загружаем историю для 1m ATR
             result_1m = await rest._request("GET", "/v5/market/kline", {
                 "category": "spot", "symbol": symbol, "interval": "1", "limit": "20"
             })
@@ -221,7 +221,6 @@ class MarketBuffer:
             for row in rows_1m:
                 self.atr.feed_history(float(row[2]), float(row[3]), float(row[4]))
             
-            # 2. ✅ V2: Загружаем историю для 5m ATR
             result_5m = await rest._request("GET", "/v5/market/kline", {
                 "category": "spot", "symbol": symbol, "interval": "5", "limit": "20"
             })
@@ -229,13 +228,13 @@ class MarketBuffer:
             for row in rows_5m:
                 self.atr_5m.feed_history(float(row[2]), float(row[3]), float(row[4]))
                 
-            logger.info(f"📚 [MarketBuffer] История загружена. ATR(1m): {self.atr.get_atr():.3f}, ATR(5m): {self.atr_5m.get_atr():.3f}")
+            logger.info(f"📚 [{self.symbol}] [MarketBuffer] История загружена. ATR(1m): {self.atr.get_atr():.3f}, ATR(5m): {self.atr_5m.get_atr():.3f}")
         except Exception as e:
-            logger.warning(f"⚠️ [MarketBuffer] Не удалось загрузить историю ATR (будет прогрев через WS): {e}")
+            logger.warning(f"⚠️ [{self.symbol}] [MarketBuffer] Не удалось загрузить историю ATR: {e}")
 
     async def start(self):
         self._snapshot_task = asyncio.create_task(self._snapshot_loop())
-        logger.info("🔬 [MarketBuffer] Запущен. Публикация снапшотов 1 раз/сек.")
+        logger.info(f"🔬 [{self.symbol}] [MarketBuffer] Запущен. Публикация снапшотов 1 раз/сек.")
     
     async def stop(self):
         if self._snapshot_task: self._snapshot_task.cancel()
@@ -266,12 +265,11 @@ class MarketBuffer:
             return
         
         if topic.startswith("kline.1"):
-            self.atr.update_kline(kline)  # ✅ Переименовано в универсальное
+            self.atr.update_kline(kline)
             self._klines_count += 1
             if self.current_price == 0:
                 self.current_price = float(kline.get("close", kline.get("c", 0)))
         elif topic.startswith("kline.5"):
-            # ✅ V2: Кормим 5-минутный калькулятор
             self.atr_5m.update_kline(kline)
     
     async def _snapshot_loop(self):
@@ -280,29 +278,31 @@ class MarketBuffer:
             while True:
                 await asyncio.sleep(1.0)
                 tick += 1
-                await self.bus.publish("MARKET:SNAPSHOT", self.get_snapshot())
+                # ✅ ИСПРАВЛЕНО: Публикация снапшота с указанием символа
+                await self.bus.publish(f"MARKET:SNAPSHOT:{self.symbol}", self.get_snapshot())
                 
                 if tick % 30 == 0:
                     poc = self.volume_profile.get_poc()
                     hvn = self.volume_profile.get_hvn(3)
                     poc_str = f"{poc['price']:.2f}" if poc else "-"
                     logger.info(
-                        f"🔍 [MarketBuffer] price={self.current_price:.2f} | ATR(1m)={self.atr.get_atr():.3f} | ATR(5m)={self.atr_5m.get_atr():.3f} | "
+                        f"🔍 [{self.symbol}] price={self.current_price:.2f} | ATR(1m)={self.atr.get_atr():.3f} | ATR(5m)={self.atr_5m.get_atr():.3f} | "
                         f"Δ5m={self.delta.get_velocity(300):+.1f} | BidWall={self.orderbook.get_max_bid_wall():.0f} "
                         f"AskWall={self.orderbook.get_max_ask_wall():.0f} | POC={poc_str}"
                     )
                     if hvn:
-                        logger.info(f"   🔷 HVN: " + ", ".join(f"{h['price']:.2f}:{h['volume']:.0f}" for h in hvn))
-                    logger.info(f"   📊 Счётчики: трейдов={self._trades_count}, OB={self._ob_updates}, klines={self._klines_count}")
+                        logger.info(f"   🔷 [{self.symbol}] HVN: " + ", ".join(f"{h['price']:.2f}:{h['volume']:.0f}" for h in hvn))
+                    logger.info(f"   📊 [{self.symbol}] Счётчики: трейдов={self._trades_count}, OB={self._ob_updates}, klines={self._klines_count}")
         except asyncio.CancelledError:
             pass
 
     def get_snapshot(self) -> Dict[str, Any]:
         return {
+            "symbol": self.symbol, # ✅ Добавлен символ в снапшот для валидации
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "current_price": self.current_price,
             "atr": self.atr.get_atr(),
-            "atr_5m": self.atr_5m.get_atr(),  # ✅ V2: Добавлено в снапшот
+            "atr_5m": self.atr_5m.get_atr(),
             "walls": {
                 "walls_bid": self.orderbook.walls_bid, "walls_ask": self.orderbook.walls_ask,
                 "bid_v1_max": self.orderbook.get_max_bid_wall(), "ask_v1_max": self.orderbook.get_max_ask_wall(),
