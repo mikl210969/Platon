@@ -10,7 +10,7 @@ bybit:
   # mainnet: https://api.bybit.com
 
 trading:
-  symbol: "SOLUSDT"
+  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"] # ✅ Мультивалютность v1.0
   category: "linear"
   
   exit_logic: "structure"
@@ -41,6 +41,31 @@ trading:
     breakeven_after_tp1: false         # Отключено, так как работает post_tp1_logic
     planned_size: 10.0                 # Для динамического сайзинга
     order_ttl_seconds: 120             # Умный таймер
+
+# ✅ СПЕЦИФИЧЕСКИЕ ПАРАМЕТРЫ ПО ИНСТРУМЕНТАМ
+instruments:
+  SOLUSDT:
+    enabled: true
+    min_wall_value_usd: 50000          # LOCKED: Работает как есть
+    
+  LINKUSDT:
+    enabled: true
+    min_wall_value_usd: 80000          # ADD: Звезда шоу (+22%, PF 3.75)
+    
+  ETHUSDT:
+    enabled: true
+    min_wall_value_usd: 120000         # TUNE: Снижено с 200k для увеличения потока
+    
+  BTCUSDT:
+    enabled: false                     # DROP: Нет edge на L1
+    
+  BNBUSDT:
+    enabled: false                     # TEST: Ждем данных
+    min_wall_value_usd: 120000
+    
+  AVAXUSDT:
+    enabled: false                     # TEST: Ждем данных
+    min_wall_value_usd: 60000
 
 self_test:
   enabled: false

@@ -2,11 +2,12 @@
 Adaptive Zone V1 Strategy.
 Поиск аномальных зон (крупные стены) + возврат цены + фильтр дельты.
 LONG (стены bid) и SHORT (стены ask).
-V2/Блок4: замок R4 (одна сделка за раз), orderLinkId, жизненный цикл через стейт-машину.
+✅ МУЛЬТИВАЛЮТНОСТЬ: Изоляция зон по символам.
 """
 import asyncio
 import json
 import logging
+import sys  # ✅ Вынесен в глобальную область для sys.exit()
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -53,14 +54,14 @@ class AnomalyZone:
     min_price_after: Optional[float] = None
     max_price_after: Optional[float] = None
     candles_buffer: List[Dict[str, Any]] = field(default_factory=list)
-    rejection_logged: bool = False  # ← ✅ ДОБАВИТЬ ЭТУ СТРОКУ
+    rejection_logged: bool = False
 
 
 class AdaptiveZoneV1:
     def __init__(self, event_bus: EventBus, rest_client=None, order_manager=None, 
                  passport_storage=None, position_monitor=None, shadow_mode: bool = True, 
                  min_departure_pct: float = 0.3, max_departure_pct: float = 4.0,
-                 config=None):
+                 config=None, symbol: str = "SOLUSDT"):  # ✅ ДОБАВЛЕН SYMBOL
         
         self.bus = event_bus
         self.rest_client = rest_client
@@ -70,6 +71,7 @@ class AdaptiveZoneV1:
         self.shadow_mode = shadow_mode
         self.min_departure_pct = min_departure_pct
         self.max_departure_pct = max_departure_pct
+        self.symbol = symbol  # ✅ СОХРАНЯЕМ СИМВОЛ ДЛЯ ИЗОЛЯЦИИ
         
         self.config = config or {}
         
@@ -78,22 +80,28 @@ class AdaptiveZoneV1:
         # ← V2/Блок5: Читаем TTL из конфига (дефолт 120 сек)
         self.order_ttl_seconds = self.config.get("trading.orders.order_ttl_seconds", 120)
         
-        logger.info(f"🎯 AdaptiveZoneV1: exit_logic = '{self.exit_logic}', order_ttl = {self.order_ttl_seconds}s")
+        logger.info(f" [{self.symbol}] AdaptiveZoneV1: exit_logic = '{self.exit_logic}', order_ttl = {self.order_ttl_seconds}s")
         
-        self.active_zones: List[AnomalyZone] = []
+        # ✅ ИЗОЛЯЦИЯ ЗОН ПО СИМВОЛАМ
+        self.active_zones_by_symbol: Dict[str, List[AnomalyZone]] = {self.symbol: []}
         self.current_thresholds: Optional[Any] = None
         self.current_snapshot: Optional[Dict[str, Any]] = None
 
-        self.zones_file = Path("logs/active_zones.json")
+        self.zones_file = Path(f"logs/active_zones_{self.symbol}.json")  # ✅ Отдельный файл на символ
         self.zones_file.parent.mkdir(exist_ok=True)
         self._load_zones()
 
         self.bus.subscribe("ANALYTICS:THRESHOLDS", self._on_thresholds)
-        self.bus.subscribe("MARKET:SNAPSHOT", self._on_snapshot)
+        self.bus.subscribe(f"MARKET:SNAPSHOT:{self.symbol}", self._on_snapshot)  # ✅ Подписка только на свой символ
         # ✅ V2/Блок5: Подписка на событие отмены таймера для условного сброса зон
         self.bus.subscribe("ORDER:TIMER_CANCELLED_WITH_ZONE", self._on_timer_cancelled)
 
-        logger.info(f"🎯 AdaptiveZoneV1 инициализирована. Загружено {len(self.active_zones)} зон. Теневой режим: {shadow_mode}")
+        logger.info(f"🎯 [{self.symbol}] AdaptiveZoneV1 инициализирована. Загружено {len(self.active_zones_by_symbol[self.symbol])} зон. Теневой режим: {shadow_mode}")
+
+    @property
+    def active_zones(self) -> List[AnomalyZone]:
+        """Свойство для обратной совместимости, возвращает зоны текущего символа."""
+        return self.active_zones_by_symbol.get(self.symbol, [])
 
     # ------------------------------------------------------------
     # V2/Блок4: глобальный замок R4 — одна активная сделка за раз
@@ -128,22 +136,22 @@ class AdaptiveZoneV1:
                         max_price_after=item.get('max_price_after'),
                         candles_buffer=item.get('candles_buffer', [])
                     )
-                    self.active_zones.append(zone)
+                    self.active_zones_by_symbol[self.symbol].append(zone)
         except Exception as e:
-            logger.error(f"Ошибка загрузки зон: {e}")
+            logger.error(f"[{self.symbol}] Ошибка загрузки зон: {e}")
 
     def _save_zones(self):
         try:
-            data = [asdict(zone) for zone in self.active_zones]
+            data = [asdict(zone) for zone in self.active_zones_by_symbol.get(self.symbol, [])]
             with open(self.zones_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"Ошибка сохранения зон: {e}")
+            logger.error(f"[{self.symbol}] Ошибка сохранения зон: {e}")
 
     async def _get_futures_price(self, symbol: str) -> Optional[float]:
         """Получает текущую цену фьючерса через REST (один запрос на сигнал)."""
         if not self.rest_client:
-            logger.warning("⚠️ REST-клиент не передан, проверка спреда пропущена")
+            logger.warning(f"[{self.symbol}] ⚠️ REST-клиент не передан, проверка спреда пропущена")
             return None
 
         try:
@@ -152,7 +160,7 @@ class AdaptiveZoneV1:
                 futures_price = float(ticker["list"][0]["lastPrice"])
                 return futures_price
         except Exception as e:
-            logger.error(f"❌ Ошибка получения фьючерсной цены: {e}")
+            logger.error(f"[{self.symbol}] ❌ Ошибка получения фьючерсной цены: {e}")
 
         return None
 
@@ -189,7 +197,7 @@ class AdaptiveZoneV1:
         if not zone_id:
             return
             
-        # Находим зону
+        # Находим зону ТОЛЬКО в текущем символе
         zone = next((z for z in self.active_zones if z.id == zone_id), None)
         if not zone or zone.state != "ACTIVE_TRADE":
             return
@@ -229,10 +237,11 @@ class AdaptiveZoneV1:
 
         now = datetime.now(timezone.utc)
         thresholds = self.current_thresholds
+        zones = self.active_zones  # Работаем только с зонами текущего символа
 
         # ✅ ПРОВЕРКА: не создавать зону, если уже есть активная рядом (в радиусе 0.5%)
         def has_nearby_zone(price: float, side: str, radius_pct: float = 0.5) -> bool:
-            for zone in self.active_zones:
+            for zone in zones:
                 if zone.side != side:
                     continue
                 if zone.state in ("INVALIDATED", "ACTIVE_TRADE"):
@@ -252,10 +261,10 @@ class AdaptiveZoneV1:
                 timestamp=now.isoformat(), side="LONG",
                 candles_buffer=[{"close": current_price, "low": current_price * 0.998, "delta": delta_5m}]
             )
-            self.active_zones.append(zone)
+            zones.append(zone)
             self._save_zones()
             autopsy_logger.info(json.dumps({"event": "ZONE_DETECTED", "zone_id": zone_id, "price": current_price, "volume": bid_wall, "threshold": thresholds.wall_threshold, "session": thresholds.current_session, "side": "LONG"}))
-            logger.info(f"🎯 [ZONE DETECTED] {zone_id} | Vol: {bid_wall:.0f} > {thresholds.wall_threshold:.0f} | LONG")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {bid_wall:.0f} > {thresholds.wall_threshold:.0f} | LONG")
 
         if ask_wall > thresholds.wall_threshold * min_volume_multiplier and not has_nearby_zone(current_price, "SHORT"):
             zone_id = f"Z_{now.strftime('%Y%m%d_%H%M')}_SHORT"
@@ -264,14 +273,14 @@ class AdaptiveZoneV1:
                 timestamp=now.isoformat(), side="SHORT",
                 candles_buffer=[{"close": current_price, "high": current_price * 1.002, "delta": delta_5m}]
             )
-            self.active_zones.append(zone)
+            zones.append(zone)
             self._save_zones()
             autopsy_logger.info(json.dumps({"event": "ZONE_DETECTED", "zone_id": zone_id, "price": current_price, "volume": ask_wall, "threshold": thresholds.wall_threshold, "session": thresholds.current_session, "side": "SHORT"}))
-            logger.info(f"🎯 [ZONE DETECTED] {zone_id} | Vol: {ask_wall:.0f} > {thresholds.wall_threshold:.0f} | SHORT")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {ask_wall:.0f} > {thresholds.wall_threshold:.0f} | SHORT")
 
         # 2. Обработка существующих зон
         zones_to_remove = []
-        for zone in self.active_zones:
+        for zone in zones:
             zone.candles_buffer.append({"close": current_price, "delta": delta_5m})
             if len(zone.candles_buffer) > 200:
                 zone.candles_buffer.pop(0)
@@ -282,7 +291,7 @@ class AdaptiveZoneV1:
                 signal = await self._check_return_and_entry(zone, current_price, delta_5m, thresholds)
                 if signal:
                     if self.shadow_mode:
-                        logger.info(f"👻 [SHADOW] Сигнал: {signal}")
+                        logger.info(f"👻 [{self.symbol}] [SHADOW] Сигнал: {signal}")
                     else:
                         # ✅ БОЕВОЙ РЕЖИМ: замок R4 → создаём паспорт → ордер
                         await self._execute_signal(signal, zone)
@@ -295,7 +304,7 @@ class AdaptiveZoneV1:
 
         if zones_to_remove:
             for z in zones_to_remove:
-                self.active_zones.remove(z)
+                zones.remove(z)
             self._save_zones()
 
     def _check_departure(self, zone: AnomalyZone, current_price: float):
@@ -432,8 +441,8 @@ class AdaptiveZoneV1:
         # 2. Сумма дельты за буфер
         zone_delta_sum = sum(c.get("delta", 0.0) for c in zone.candles_buffer)
         
-        # 3. ✅ ПРОВЕРКА СПРЕДА СПОТ/ФЬЮЧЕРС
-        futures_price = await self._get_futures_price("SOLUSDT")
+        # 3. ✅ ПРОВЕРКА СПРЕДА СПОТ/ФЬЮЧЕРС (✅ ИСПРАВЛЕНО: используем self.symbol)
+        futures_price = await self._get_futures_price(self.symbol)
         spread_pct = 0.0
 
         if futures_price and futures_price > 0:
@@ -571,7 +580,7 @@ class AdaptiveZoneV1:
 
         return {
             "signal_id": f"AdaptiveZoneV1_{uuid.uuid4().hex[:8]}",
-            "symbol": "SOLUSDT",
+            "symbol": self.symbol,  # ✅ ИСПРАВЛЕНО: используем self.symbol
             "side": zone.side,
             "entry_price": current_price,
             "sl_price": sl_price,
@@ -588,13 +597,13 @@ class AdaptiveZoneV1:
         """V2/Блок4+5: замок R4 → паспорт → ордер с orderLinkId → умный TTL."""
         from execution.passport import TradePassport, SignalSource
 
-        logger.info(f"\n{'='*60} СИГНАЛ: {signal['side']} @ {signal['entry_price']} {'='*60}")
+        logger.info(f"\n{'='*60} [{self.symbol}] СИГНАЛ: {signal['side']} @ {signal['entry_price']} {'='*60}")
 
         if not self.order_manager:
-            logger.error(" OrderManager не инициализирован!")
+            logger.error(f"[{self.symbol}] OrderManager не инициализирован!")
             return
         if not self.passport_storage:
-            logger.error("❌ PassportStorage не инициализирован!")
+            logger.error(f"[{self.symbol}] ❌ PassportStorage не инициализирован!")
             return
 
         # 🔒 ЗАМОК R4: одна активная сделка за раз

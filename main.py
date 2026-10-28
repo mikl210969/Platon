@@ -1,6 +1,7 @@
 """
 PLATO V2 — Точка входа. Фаза 2: сбор рыночных данных и аналитика.
 V2: добавлен Reconciliation Engine (сверка биржа<->паспорт) и канонические статусы.
+✅ МУЛЬТИВАЛЮТНОСТЬ: Поддержка списка символов из конфига.
 """
 import json 
 import asyncio
@@ -89,7 +90,7 @@ async def signal_generator(rest, om, monitor, storage, interval_seconds: int = 1
                 logger.info(f"⏹ [{passport.passport_id}] Сделка завершена (статус: {st}). Идем дальше.")
                 storage.save(passport)
             else:
-                logger.info(f"⏹ [{passport.passport_id}] Неожиданный статус: {st}. Идем дальше.")
+                logger.info(f" [{passport.passport_id}] Неожиданный статус: {st}. Идем дальше.")
                 storage.save(passport)
         else:
             passport.add_event("ERROR: ENTRY_FAILED", "Не удалось разместить ордер")
@@ -111,7 +112,7 @@ async def main():
     secrets_file = Path("secrets.json")
     if not secrets_file.exists():
         logger.error("❌ ОШИБКА: Файл secrets.json не найден! Создай его на основе secrets.example.json")
-        import sys; sys.exit(1)
+        sys.exit(1)  # ✅ Убран локальный import sys
         
     with open(secrets_file, 'r', encoding='utf-8') as f:
         secrets = json.load(f)
@@ -123,7 +124,7 @@ async def main():
 
     if not api_key or not api_secret:
         logger.error("❌ ОШИБКА: API ключи пусты в secrets.json. Проверь файл.")
-        import sys; sys.exit(1)
+        sys.exit(1)  # ✅ Убран локальный import sys
         
     logger.info("✅ Секреты успешно и безопасно загружены из secrets.json")
 
@@ -137,48 +138,81 @@ async def main():
     rest = BybitRestClient(api_key, api_secret, rest_url)
     uds = BybitPrivateWSClient(api_key, api_secret, ws_url, bus)
 
+    # ✅ ОБЩИЙ ORDER MANAGER И MONITOR (работают с любым символом через passport.symbol)
     om = OrderManager(rest, category="linear", event_bus=bus)
     monitor = PositionMonitor(config, bus, om, storage)
 
-    # Несекретные настройки оставляем в config.yaml
-    symbol = config.get("trading.symbol", "SOLUSDT")
-    public_ws = BybitPublicWSClient(symbol=symbol, event_bus=bus)
-    market_buffer = MarketBuffer(event_bus=bus, symbol=symbol)
+    # ✅ МУЛЬТИВАЛЮТНОСТЬ: Получаем список активных символов
+    symbols = config.get("trading.symbols", ["SOLUSDT"])
+    instruments_cfg = config.get("instruments", {})
+    
+    active_symbols = [
+        s for s in symbols 
+        if instruments_cfg.get(s, {}).get("enabled", False)
+    ]
+    
+    if not active_symbols:
+        logger.error("❌ Нет активных символов в конфиге!")
+        sys.exit(1)
+        
+    logger.info(f" Активные инструменты: {', '.join(active_symbols)}")
+
+    # ✅ СОЗДАЕМ ПУБЛИЧНЫЕ КОМПОНЕНТЫ ДЛЯ КАЖДОГО СИМВОЛА
+    public_ws_clients = []
+    market_buffers = {}
+    
+    for symbol in active_symbols:
+        pub_ws = BybitPublicWSClient(symbol=symbol, event_bus=bus)
+        public_ws_clients.append(pub_ws)
+        
+        mb = MarketBuffer(event_bus=bus, symbol=symbol)
+        market_buffers[symbol] = mb
+        
+        logger.info(f"📡 Подписка на публичные данные: {symbol}")
 
     # V2: Reconciliation Engine (источник истины биржа<->паспорт)
-    recon = ReconciliationEngine(
-        event_bus=bus,
-        rest=rest,
-        storage=storage,
-        get_active_passports=lambda: monitor.active_passports,
-        get_manager=lambda p: monitor._get_manager(p),
-        order_manager=om,
-        symbol=symbol,
-        category="linear",
-        interval_sec=30,
-        silence_sec=300,
-    )
+    # ✅ ОТДЕЛЬНЫЙ RECON ДЛЯ КАЖДОГО СИМВОЛА
+    recons = []
+    for symbol in active_symbols:
+        recon = ReconciliationEngine(
+            event_bus=bus,
+            rest=rest,
+            storage=storage,
+            get_active_passports=lambda: monitor.active_passports,
+            get_manager=lambda p: monitor._get_manager(p),
+            order_manager=om,
+            symbol=symbol,
+            category="linear",
+            interval_sec=30,
+            silence_sec=300,
+        )
+        recons.append(recon)
 
     try:
         logger.info("🚀 Запуск компонентов...")
         uds_task = asyncio.create_task(uds.connect())
-        public_ws_task = asyncio.create_task(public_ws.connect())
+        
+        # Запускаем все публичные WS
+        public_ws_tasks = [asyncio.create_task(ws.connect()) for ws in public_ws_clients]
 
-        # ✅ ЕДИНСТВЕННЫЙ REST-ЗАПРОС ДЛЯ РЫНКА: загрузка истории свечей
-        await market_buffer.bootstrap_atr(rest, "spot", symbol)
-        await market_buffer.start()
+        # ✅ ЕДИНСТВЕННЫЙ REST-ЗАПРОС ДЛЯ РЫНКА: загрузка истории свечей для всех символов
+        for symbol, mb in market_buffers.items():
+            await mb.bootstrap_atr(rest, "spot", symbol)
+            await mb.start()
 
         logger.info("🔄 Проверка наличия открытых позиций...")
         try:
-            positions = await rest._request("GET", "/v5/position/list", {"category": "linear", "symbol": symbol}, signed=True)
+            positions = await rest._request("GET", "/v5/position/list", {"category": "linear"}, signed=True)
             for pos in positions.get("list", []):
-                if float(pos.get("size", 0)) > 0:
-                    logger.warning(f"⚠️ Найдена открытая позиция: {pos.get('size')} {symbol}")
+                sym = pos.get("symbol")
+                if sym in active_symbols and float(pos.get("size", 0)) > 0:
+                    logger.warning(f"⚠️ Найдена открытая позиция: {pos.get('size')} {sym}")
         except Exception as e:
             logger.error(f"❌ Ошибка проверки позиций: {e}")
 
         # V2: запуск RECON сразу после восстановления соединений (стартовая сверка R1 внутри)
-        await recon.start()
+        for recon in recons:
+            await recon.start()
 
         # ✅ Переключатель источника сигналов
         signal_source = config.get("system.signal_source", "off")
@@ -199,34 +233,42 @@ async def main():
         logger.info("✅ Платформа работает. Сбор публичных данных активен.")
         logger.info("💡 Смотри в логе блоки '🔍 [MarketBuffer]' каждые 30 сек")
 
-        # ✅ Запуск стратегии
+        # ✅ Запуск стратегии ДЛЯ КАЖДОГО СИМВОЛА
         from analytics.statistics_engine import StatisticsEngine
         from analytics.strategy import AdaptiveZoneV1
 
         shadow_mode = config.get("system.shadow_mode", True)
         stats_engine = StatisticsEngine(event_bus=bus, window_size=100, min_observations=60)
-        strategy = AdaptiveZoneV1(
-            event_bus=bus,
-            rest_client=rest,
-            order_manager=om,
-            passport_storage=storage,
-            position_monitor=monitor,
-            shadow_mode=config.get("system.shadow_mode", True),
-            config=config  # ← ДОБАВИТЬ
-        )
-
-        if shadow_mode:
-            logger.info("👻 Стратегия работает в ТЕНЕВОМ режиме (только логи, без исполнения)")
-        else:
-            logger.info("🎯 Стратегия работает в БОЕВОМ режиме (реальное исполнение)")
+        
+        strategies = {}
+        for symbol in active_symbols:
+            strategy = AdaptiveZoneV1(
+                event_bus=bus,
+                rest_client=rest,
+                order_manager=om,
+                passport_storage=storage,
+                position_monitor=monitor,
+                shadow_mode=shadow_mode,
+                config=config,
+                symbol=symbol  # ← Передаем символ в стратегию для изоляции зон
+            )
+            strategies[symbol] = strategy
+            
+            if shadow_mode:
+                logger.info(f"👻 [{symbol}] Стратегия работает в ТЕНЕВОМ режиме")
+            else:
+                logger.info(f"🎯 [{symbol}] Стратегия работает в БОЕВОМ режиме")
 
         await stop_event.wait()
 
     finally:
         logger.info("🛑 Остановка платформы...")
-        await recon.stop()           # V2: сначала останавливаем сверку
-        await market_buffer.stop()
-        await public_ws.stop()
+        for recon in recons:
+            await recon.stop()           # V2: сначала останавливаем сверку
+        for mb in market_buffers.values():
+            await mb.stop()
+        for ws in public_ws_clients:
+            await ws.stop()
         await uds.stop()
         await rest.close()
         logger.info("✅ Платформа остановлена")
