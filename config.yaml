@@ -10,14 +10,14 @@ bybit:
   # mainnet: https://api.bybit.com
 
 trading:
-  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"] # ✅ Мультивалютность v1.0
+  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"] # Мультивалютность v1.0
   category: "linear"
   
   exit_logic: "structure"
   
   # ✅ ПОЛНЫЙ РАЗДЕЛ: Валидация структуры и Умный TP2
   structure_validation:
-    wall_volume_multiple: 4.0          # Стена должна быть >= 4× медианы за 28 баров
+    wall_volume_multiple: 3.0          # ⚠️ ВРЕМЕННО: Было 4.0. Снижено до 3.0 для E2E теста пайплайна.
     wall_baseline_bars: 28             # Окно для расчёта медианы объёма
     min_retracement_atr_multiplier: 1.5 # Минимальный откат 1.5 × ATR(5m)
     
@@ -81,4 +81,4 @@ system:
   startup_test: "none"
   test_trades_count: 10
   signal_source: "off"                 # "off" = только сбор данных и реальные сигналы
-  shadow_mode: false                   # false = боевой режим
+  shadow_mode: false                   # false = боевой режим (ордера улетают на демо-биржу)
