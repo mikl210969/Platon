@@ -63,6 +63,7 @@ class StatisticsEngine:
         
         self._obs_count = 0
         self._is_ready = False
+        self.current_thresholds = None  # ✅ ДОБАВИТЬ ЭТУ СТРОКУ
 
         # ✅ НОВОЕ: История объёмов стен для расчёта медианы
         self.wall_volume_history_bid = deque(maxlen=wall_baseline_bars)
@@ -80,7 +81,7 @@ class StatisticsEngine:
         
         # ✅ ИЗМЕНЕНО: Подписка на изолированный топик конкретного символа
         self.bus.subscribe(f"MARKET:SNAPSHOT:{self.symbol}", self._on_snapshot)
-        logger.info(f"📊 [{self.symbol}] StatisticsEngine инициализирован (EMA + Median {wall_baseline_bars} bars).")
+        logger.info(f" [{self.symbol}] StatisticsEngine инициализирован (EMA + Median {wall_baseline_bars} bars).")
 
     def _get_current_session(self, dt: datetime) -> SessionConfig:
         utc_dt = dt - self.tz_offset
@@ -117,15 +118,16 @@ class StatisticsEngine:
         max_wall = max(bid_wall, ask_wall)
         delta_5m = delta.get("windows", {}).get(300, {}).get("velocity", 0.0)
         
-        # ✅ Обновляем медианы
+        # ✅ 1. СНАЧАЛА ОБНОВЛЯЕМ ДАННЫЕ (без проверки thresholds!)
         self.update_wall_median(bid_wall, ask_wall)
-        
-        # Обновляем EMA
         self.update(datetime.now(timezone.utc), max_wall, delta_5m, atr)
         
+        # ✅ 2. ТОЛЬКО ПОСЛЕ НАКОПЛЕНИЯ ДАННЫХ ПУБЛИКУЕМ ПОРОГИ
         if self._is_ready:
             thresholds = self.get_thresholds(datetime.now(timezone.utc))
             if thresholds:
+                # Сохраняем актуальные пороги для стратегии
+                self.current_thresholds = thresholds 
                 await self.bus.publish("ANALYTICS:THRESHOLDS", thresholds)
 
     def update(self, timestamp: datetime, wall_max: float, delta: float, atr: float):
@@ -158,18 +160,30 @@ class StatisticsEngine:
 
     def get_thresholds(self, current_time: datetime) -> Optional[DynamicThresholds]:
         if not self._is_ready:
+            logger.warning(f"⚠️ [{self.symbol}] get_thresholds called but _is_ready=False")
             return None
 
         session = self._get_current_session(current_time)
         wall_std = max(self._ema_wall_var ** 0.5, 0.01)
         delta_std = max(self._ema_delta_var ** 0.5, 0.01)
 
-        return DynamicThresholds(
-            wall_threshold=self._ema_wall_mean + (session.k_wall * wall_std),
-            delta_threshold_long=self._ema_delta_mean - (session.k_delta * delta_std),
-            delta_threshold_short=self._ema_delta_mean + (session.k_delta * delta_std),
-            max_departure_pct=session.k_atr * self._ema_atr_mean,
-            current_session=session.name,
-            wall_median_bid=self.wall_median_bid if self.wall_median_bid > 0 else self._ema_wall_mean,
-            wall_median_ask=self.wall_median_ask if self.wall_median_ask > 0 else self._ema_wall_mean
-        )
+        try:
+            result = DynamicThresholds(
+                wall_threshold=self._ema_wall_mean + (session.k_wall * wall_std),
+                delta_threshold_long=self._ema_delta_mean - (session.k_delta * delta_std),
+                delta_threshold_short=self._ema_delta_mean + (session.k_delta * delta_std),
+                max_departure_pct=session.k_atr * self._ema_atr_mean,
+                current_session=session.name,
+                wall_median_bid=self.wall_median_bid if self.wall_median_bid > 0 else self._ema_wall_mean,
+                wall_median_ask=self.wall_median_ask if self.wall_median_ask > 0 else self._ema_wall_mean
+            )
+            
+            # ✅ ЛОГИРУЕМ СОЗДАНИЕ ПОРОГОВ
+            logger.debug(f"✅ [{self.symbol}] Thresholds CREATED: wall={result.wall_threshold:.2f}, med_bid={result.wall_median_bid:.2f}, med_ask={result.wall_median_ask:.2f}")
+            
+            return result
+            
+        except Exception as e:
+            # ✅ ЛОГИРУЕМ ОШИБКУ СОЗДАНИЯ ПОРОГОВ
+            logger.error(f"❌ [{self.symbol}] Failed to create thresholds: {e}", exc_info=True)
+            return None

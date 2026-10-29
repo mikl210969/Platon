@@ -204,11 +204,19 @@ class AdaptiveZoneV1:
         zones = self.active_zones
         
         # ✅ ЕДИНЫЙ ИСТОЧНИК ИСТИНЫ: читаем коэффициент из конфига
-        wall_quality_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
+        wall_quality_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 2.0)
         
-        # Рассчитываем единый порог качества для создания зоны
-        quality_threshold_bid = thresholds.wall_threshold * wall_quality_mult
-        quality_threshold_ask = thresholds.wall_threshold * wall_quality_mult
+        # ✅ БАЗОВЫЙ УРОВЕНЬ: используем МЕДИАНУ, а не EMA+Std
+        median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
+        median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
+        
+        # Защита от нулевых значений
+        safe_med_bid = max(median_bid, 1.0)
+        safe_med_ask = max(median_ask, 1.0)
+
+        # Рассчитываем пороги на основе медианы
+        quality_threshold_bid = safe_med_bid * wall_quality_mult
+        quality_threshold_ask = safe_med_ask * wall_quality_mult
 
         def has_nearby_zone(price: float, side: str, radius_pct: float = 0.5) -> bool:
             for zone in zones:
@@ -221,7 +229,7 @@ class AdaptiveZoneV1:
                     return True
             return False
 
-        # ✅ LONG: Создаем зону ТОЛЬКО если стена >= 4x медианы
+        # ✅ LONG: Создаем зону ТОЛЬКО если стена >= multiplier x МЕДИАНЫ
         if bid_wall > quality_threshold_bid and not has_nearby_zone(current_price, "LONG"):
             zone_id = f"Z_{now.strftime('%Y%m%d_%H%M')}_LONG"
             zone = AnomalyZone(
@@ -236,18 +244,19 @@ class AdaptiveZoneV1:
             self._save_zones()
             
             autopsy_logger.info(json.dumps({
-                "event": "ZONE_DETECTED_HIGH_QUALITY", 
+                "event": "ZONE_DETECTED_MEDIAN_BASED", 
                 "symbol": self.symbol, 
                 "zone_id": zone_id, 
                 "price": current_price, 
                 "volume": round(bid_wall, 2), 
-                "threshold_used": round(quality_threshold_bid, 2),
+                "median_ref": round(safe_med_bid, 2),
                 "multiplier_applied": wall_quality_mult,
+                "required_vol": round(quality_threshold_bid, 2),
                 "side": "LONG"
             }))
-            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED - QUALIFIED] {zone_id} | Vol: {bid_wall:.0f} > {quality_threshold_bid:.0f} ({wall_quality_mult}x Med)")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {bid_wall:.0f} > Req: {quality_threshold_bid:.0f} ({wall_quality_mult}x Med)")
 
-        # ✅ SHORT: Создаем зону ТОЛЬКО если стена >= 4x медианы
+        # ✅ SHORT: Создаем зону ТОЛЬКО если стена >= multiplier x МЕДИАНЫ
         if ask_wall > quality_threshold_ask and not has_nearby_zone(current_price, "SHORT"):
             zone_id = f"Z_{now.strftime('%Y%m%d_%H%M')}_SHORT"
             zone = AnomalyZone(
@@ -262,16 +271,17 @@ class AdaptiveZoneV1:
             self._save_zones()
             
             autopsy_logger.info(json.dumps({
-                "event": "ZONE_DETECTED_HIGH_QUALITY", 
+                "event": "ZONE_DETECTED_MEDIAN_BASED", 
                 "symbol": self.symbol, 
                 "zone_id": zone_id, 
                 "price": current_price, 
                 "volume": round(ask_wall, 2), 
-                "threshold_used": round(quality_threshold_ask, 2),
+                "median_ref": round(safe_med_ask, 2),
                 "multiplier_applied": wall_quality_mult,
+                "required_vol": round(quality_threshold_ask, 2),
                 "side": "SHORT"
             }))
-            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED - QUALIFIED] {zone_id} | Vol: {ask_wall:.0f} > {quality_threshold_ask:.0f} ({wall_quality_mult}x Med)")
+            logger.info(f"🎯 [{self.symbol}] [ZONE DETECTED] {zone_id} | Vol: {ask_wall:.0f} > Req: {quality_threshold_ask:.0f} ({wall_quality_mult}x Med)")
 
         # Обработка существующих зон (без изменений)
         zones_to_remove = []
@@ -370,11 +380,12 @@ class AdaptiveZoneV1:
         
         if zone_age_seconds > max_age_seconds:
             # ✅ ФИНАЛЬНАЯ СВОДКА: пишем ZONE_ANALYSIS ОДИН РАЗ при инвалидации
-            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
+            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 2.0)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
             
-            expected_wall = wall_mult * (median_bid if zone.side == "LONG" else median_ask)
+            safe_med = max((median_bid if zone.side == "LONG" else median_ask), 1.0)
+            expected_wall = wall_mult * safe_med
             wall_ratio = zone.volume / expected_wall if expected_wall > 0 else 0
             
             atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
@@ -392,7 +403,7 @@ class AdaptiveZoneV1:
                 "zone_id": zone.id,
                 "side": zone.side,
                 "wall_vol": round(zone.volume, 2),
-                "median": round(expected_wall / wall_mult, 2),
+                "median": round(safe_med, 2),
                 "wall_ratio": round(wall_ratio, 2),
                 "atr5m": round(atr_5m, 4),
                 "dep_threshold": round(dep_threshold, 4),
@@ -435,33 +446,38 @@ class AdaptiveZoneV1:
         if exit_mode == "structure":
             atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
             
-            # ✅ 1. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (с защитой от спама)
-            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 4.0)
+            # ✅ 1. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (синхронизировано с созданием через МЕДИАНА)
+            wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 2.0)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
             
+            safe_med_bid = max(median_bid, 1.0)
+            safe_med_ask = max(median_ask, 1.0)
+            
             if zone.side == "LONG":
-                if zone.volume < (wall_mult * median_bid):
+                required_strength = safe_med_bid * wall_mult
+                if zone.volume < required_strength:
                     if not zone.rejection_logged:
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_bid:.0f}")
+                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {required_strength:.0f}")
                         zone.rejection_logged = True
                         autopsy_logger.info(json.dumps({
                             "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
                             "reason": "weak_wall_volume", "wall_vol": round(zone.volume, 2),
-                            "threshold": round(wall_mult * median_bid, 2)
+                            "threshold": round(required_strength, 2)
                         }))
                     return None
                 else:
                     zone.rejection_logged = False
             else:
-                if zone.volume < (wall_mult * median_ask):
+                required_strength = safe_med_ask * wall_mult
+                if zone.volume < required_strength:
                     if not zone.rejection_logged:
-                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {wall_mult * median_ask:.0f}")
+                        logger.info(f"️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {required_strength:.0f}")
                         zone.rejection_logged = True
                         autopsy_logger.info(json.dumps({
                             "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
                             "reason": "weak_wall_volume", "wall_vol": round(zone.volume, 2),
-                            "threshold": round(wall_mult * median_ask, 2)
+                            "threshold": round(required_strength, 2)
                         }))
                     return None
                 else:
