@@ -97,9 +97,15 @@ class AdaptiveZoneV1:
         return self.active_zones_by_symbol.get(self.symbol, [])
 
     def _has_active_trade(self) -> bool:
+        """Проверяет, есть ли активная сделка ТОЛЬКО для текущего символа."""
         if not self.position_monitor:
             return False
+            
         for p in self.position_monitor.active_passports.values():
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Игнорируем паспорта других символов
+            if p.symbol != self.symbol:
+                continue
+                
             try:
                 mgr = self.position_monitor._get_manager(p)
                 if mgr.is_active():
@@ -107,6 +113,7 @@ class AdaptiveZoneV1:
             except Exception:
                 if p.status not in ("CLOSED", "ORDER_CANCELLED", "ORDER_REJECTED", "ERROR_STATE", "IDLE"):
                     return True
+                    
         return False
 
     def _load_zones(self):

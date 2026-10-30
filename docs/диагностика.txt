@@ -1,0 +1,100 @@
+Этап 1: Первые 5 минут после запуска (быстрая проверка)
+
+# 1. Проверка на критические ошибки при старте
+Select-String -Path "plato.log" -Pattern "ERROR|Exception|Traceback" | Select-Object -Last 10
+
+# 2. Проверка готовности StatisticsEngine (должны быть все 3 символа)
+Select-String -Path "plato.log" -Pattern "StatisticsEngine.*готов" | Select-Object -Last 5
+
+# 3. Проверка, что пороги создаются (не должно быть пусто)
+Select-String -Path "plato.log" -Pattern "Thresholds CREATED" | Select-Object -Last 3
+
+# 4. Проверка, что RECON запустился корректно
+Select-String -Path "plato.log" -Pattern "RECON.*Запущен" | Select-Object -Last 3
+
+
+
+ Критерий успеха:
+Нет ERROR при старте
+Все 3 символа показали "StatisticsEngine готов"
+Есть строки "Thresholds CREATED"
+RECON запустился
+
+
+
+️ Этап 2: Через 15-30 минут (проверка стабильности)
+
+# 1. Проверка работы RECON (должны быть периодические сверки)
+Select-String -Path "plato.log" -Pattern "RECON:PERIODIC.*pos_size=" | Select-Object -Last 5
+
+# 2. Проверка защиты молодых ордеров (должны быть пропуски сверки)
+Select-String -Path "plato.log" -Pattern "Пропуск сверки для молодого ордера" | Measure-Object | Select-Object Count
+
+# 3. Проверка на ERROR_STATE (должно быть 0 или очень мало)
+Select-String -Path "plato.log" -Pattern "-> ERROR_STATE" | Measure-Object | Select-Object Count
+
+# 4. Проверка force_close (если были проблемы - должны быть закрытия)
+Select-String -Path "plato.log" -Pattern "FORCE_CLOSED" | Select-Object -Last 5
+
+# 5. Проверка создания зон
+Select-String -Path "plato.log" -Pattern "ZONE_DETECTED" | Select-Object -Last 5
+
+# 6. Проверка инвалидации зон при ошибках (если были ошибки ордеров)
+Select-String -Path "plato.log" -Pattern "ZONE_INVALIDATED_ON_ERROR" | Select-Object -Last 3
+
+
+✅ Критерий успеха:
+RECON работает (есть строки с pos_size=)
+Есть пропуски сверки для молодых ордеров (хотя бы несколько)
+ERROR_STATE = 0 или минимум (не больше 1-2)
+Нет каскада FORCE_CLOSED
+
+
+
+⏱️ Этап 3: Через 1-2 часа (анализ эффективности)
+
+
+# 1. Запустить анализ паспортов
+python analyze_passports.py
+
+# 2. Сохранить результат в файл для истории
+python analyze_passports.py > passport_analysis_$(Get-Date -Format "yyyyMMdd_HHmm").txt
+
+# 3. Проверить количество строк в autopsy (не должно быть тысяч)
+Get-Content "logs\strategy_autopsy.jsonl" | Measure-Object | Select-Object Count
+
+# 4. Посмотреть последние события в autopsy
+Get-Content "logs\strategy_autopsy.jsonl" | Select-Object -Last 10 | ForEach-Object { $_ | ConvertFrom-Json | Select-Object event, symbol, zone_id }
+
+# 5. Проверить, есть ли дубликаты зон (одна и та же зона много раз)
+Get-Content "logs\strategy_autopsy.jsonl" | ConvertFrom-Json | Where-Object { $_.event -eq "ZONE_DETECTED" } | Group-Object zone_id | Sort-Object Count -Descending | Select-Object -First 5
+
+
+✅ Критерий успеха:
+ERROR_STATE = 0
+Win Rate > 0% (хотя бы одна прибыльная сделка)
+Нет тысяч записей в autopsy (норма: 50-200 за 2 часа)
+Нет дубликатов зон (одна зона = один паспорт)
+
+
+🚨 Экстренная диагностика (если что-то пошло не так)
+
+# 1. Что происходит прямо сейчас (последние 20 строк лога)
+Get-Content "plato.log" -Tail 20
+
+# 2. Все ошибки за последний час
+Select-String -Path "plato.log" -Pattern "ERROR" | Where-Object { $_ -match (Get-Date).AddHours(-1).ToString("yyyy-MM-dd HH") } | Select-Object -Last 10
+
+# 3. Сколько паспортов в каждом состоянии
+Get-Content "logs\passports.json" | ConvertFrom-Json | Group-Object status | Select-Object Name, Count
+
+# 4. Какие зоны сейчас активны
+Get-Content "logs\active_zones_*.json" | ConvertFrom-Json | Where-Object { $_.state -ne "INVALIDATED" -and $_.state -ne "CLOSED" } | Select-Object id, symbol, state, price
+
+# 5. Проверка, жив ли процесс
+Get-Process python | Where-Object { $_.WorkingSet -gt 100MB } | Select-Object Id, CPU, WorkingSet
+
+
+
+
+.\check_health.ps1

@@ -115,6 +115,10 @@ class TradePassport:
     # === Чёрный ящик ===
     timeline: List[Dict[str, Any]] = field(default_factory=list)
 
+    # ✅ НОВОЕ: Защита от гонок состояний между UDS и RECON
+    is_closing: bool = False
+    closing_source: str = ""  # "UDS", "MANUAL", "RECON_TIMEOUT"
+
     # ------------------------------------------------------------
     # Расчёты
     # ------------------------------------------------------------
@@ -125,8 +129,7 @@ class TradePassport:
             return (self.entry_price - exit_price) * qty
 
     def calculate_leg_pnl(self, exit_price: float, closed_qty: float) -> float:
-        """PnL одного плеча строго от закрытого объёма этого плеча.
-        Исправляет баг архива (раньше считалось от полного position_size → ×2)."""
+        """PnL одного плеча строго от закрытого объёма этого плеча."""
         if self.side.upper() == "LONG":
             return (exit_price - self.entry_price) * closed_qty
         else:
@@ -212,4 +215,7 @@ class TradePassport:
             "tp2_pnl": self.tp2_pnl,
             "sl_pnl": self.sl_pnl,
             "sizing_info": self.sizing_info,
+            # ✅ НОВОЕ: Поля состояния закрытия
+            "is_closing": self.is_closing,
+            "closing_source": self.closing_source,
         }

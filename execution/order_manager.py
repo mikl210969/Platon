@@ -1,8 +1,10 @@
 """
 Менеджер ордеров. Отправляет, модифицирует и отменяет ордера на бирже.
-V2/Блок6: Исправлен расчет объема для BE + защита от переноса SL при отключенном BE.
+✅ ИСПРАВЛЕНО: Универсальное округление и ФОРМАТИРОВАНИЕ количества (Qty) до шага биржи 
+для 100% предотвращения ошибок "Qty invalid" и "truncated to zero" из-за floating point.
 """
 import logging
+import math
 from typing import Optional
 from core.event_bus import EventBus
 from adapters.bybit_rest import BybitRestClient
@@ -11,12 +13,46 @@ from execution.order_timer import OrderTimer
 
 logger = logging.getLogger("plato.order_manager")
 
+
 class OrderManager:
-    def __init__(self, rest_client: BybitRestClient, category: str = "linear", event_bus: Optional[EventBus] = None):
+    def __init__(self, rest_client: BybitRestClient, category: str = "linear", 
+                 event_bus: Optional[EventBus] = None, storage=None):
         self.rest = rest_client
         self.category = category
         self.bus = event_bus
+        self.storage = storage
         self.order_timer = OrderTimer(rest_client, event_bus)
+
+    @staticmethod
+    def _round_down_qty(qty: float, symbol: str) -> float:
+        """Безопасное округление количества ВНИЗ до минимального шага биржи."""
+        MIN_QTY_STEPS = {
+            "SOLUSDT": 0.1,
+            "LINKUSDT": 1.0,
+            "ETHUSDT": 0.01,
+            "BTCUSDT": 0.001,
+            "BNBUSDT": 0.01,
+            "AVAXUSDT": 0.1,
+        }
+        min_step = MIN_QTY_STEPS.get(symbol, 0.001)
+        rounded = math.floor(qty / min_step) * min_step
+        decimals = len(str(min_step).split('.')[-1]) if '.' in str(min_step) else 0
+        return round(rounded, decimals)
+    
+    @staticmethod
+    def _format_qty(qty: float, symbol: str) -> str:
+        """Форматирует количество в строку с точным количеством знаков после запятой."""
+        MIN_QTY_STEPS = {
+            "SOLUSDT": 0.1,
+            "LINKUSDT": 1.0,
+            "ETHUSDT": 0.01,
+            "BTCUSDT": 0.001,
+            "BNBUSDT": 0.01,
+            "AVAXUSDT": 0.1,
+        }
+        min_step = MIN_QTY_STEPS.get(symbol, 0.001)
+        decimals = len(str(min_step).split('.')[-1]) if '.' in str(min_step) else 0
+        return f"{qty:.{decimals}f}"
 
     async def has_open_position(self, symbol: str) -> bool:
         try:
@@ -47,18 +83,23 @@ class OrderManager:
                 logger.warning(f"️ [{passport.passport_id}] Пропуск: уже есть открытая позиция по {passport.symbol}")
                 return False
 
-            passport.planned_size = passport.position_size
+            safe_qty = self._round_down_qty(float(passport.position_size), passport.symbol)
+            
+            if safe_qty <= 0:
+                passport.add_event("ERROR: QTY_INVALID", f"Рассчитанное количество {safe_qty} <= 0")
+                logger.error(f"❌ [{passport.passport_id}] Ошибка: рассчитанное количество {safe_qty} <= 0")
+                return False
 
+            passport.planned_size = safe_qty
             passport.sizing_info.update({
-                "final_quantity": passport.position_size,
+                "final_quantity": safe_qty,
                 "base_sl_distance": abs(passport.entry_price - passport.sl_price) / passport.entry_price * 100,
                 "sl_distance": abs(passport.entry_price - passport.sl_price) / passport.entry_price * 100
             })
 
-            passport.add_event("ACTION: PLACE_ENTRY", f"Размещение {passport.side} {passport.position_size} @ {limit_price}")
-            logger.info(f"[{passport.passport_id}] Размещение входа: {passport.side} {passport.position_size} @ {limit_price}")
+            passport.add_event("ACTION: PLACE_ENTRY", f"Размещение {passport.side} {safe_qty} @ {limit_price}")
+            logger.info(f"[{passport.passport_id}] Размещение входа: {passport.side} {safe_qty} @ {limit_price}")
 
-            # V2/Блок4: orderLinkId для сопоставления UDS<->REST
             extra_params = {}
             if order_link_id:
                 extra_params["orderLinkId"] = order_link_id
@@ -67,7 +108,7 @@ class OrderManager:
                 category=self.category,
                 symbol=passport.symbol,
                 side="Buy" if passport.side == "LONG" else "Sell",
-                qty=str(passport.position_size),
+                qty=self._format_qty(safe_qty, passport.symbol),
                 price=limit_price,
                 order_type="Limit",
                 time_in_force="GTC",
@@ -77,16 +118,15 @@ class OrderManager:
             order_id = result.get("orderId")
             if order_id:
                 passport.add_order_record(order_id, "LIMIT_ENTRY", "New", float(limit_price),
-                                          passport.position_size, client_order_id=order_link_id)
+                                          safe_qty, client_order_id=order_link_id)
                 passport.add_event("SUCCESS: ORDER_PLACED", f"Биржа приняла ордер {order_id}")
 
-                # ✅ V2/Блок5: Передаем zone_id в таймер для условного сброса зоны
                 await self.order_timer.start_timer(
                     category=self.category,
                     symbol=passport.symbol,
                     order_id=order_id,
                     timeout_seconds=timeout_seconds,
-                    planned_qty=passport.position_size,
+                    planned_qty=safe_qty,
                     zone_id=zone_id,
                     fallback_to_market=False
                 )
@@ -105,34 +145,48 @@ class OrderManager:
 
     async def place_protective_orders(self, passport: TradePassport) -> bool:
         try:
-            qty_half = str(passport.position_size / 2.0)
-            qty_full = str(passport.position_size)
+            # ✅ ПОСЛЕДНЯЯ ЛИНИЯ ОБОРОНЫ: Блокировка если паспорт закрывается
+            if getattr(passport, 'is_closing', False):
+                logger.info(f"🛑 Blocked protective orders for {passport.passport_id}: Passport is closing (source={getattr(passport, 'closing_source', 'UNKNOWN')}).")
+                return False
+            
+            pos_size = self._round_down_qty(float(passport.position_size), passport.symbol)
+            
+            if pos_size <= 0:
+                logger.error(f" [{passport.passport_id}] Размер позиции {pos_size} <= 0. Защита пропущена.")
+                return False
+
+            qty_half = self._round_down_qty(pos_size / 2.0, passport.symbol)
+            if qty_half <= 0:
+                qty_half = pos_size
+                
+            qty_full = pos_size
             symbol = passport.symbol
             side_exit = "Sell" if passport.side == "LONG" else "Buy"
             
             tp1_res = await self.rest.place_order(
                 category=self.category, symbol=symbol, side=side_exit,
-                qty=qty_half, price=str(passport.tp1_price),
-                order_type="Limit", time_in_force="GTC",
-                reduce_only=True
+                qty=self._format_qty(qty_half, passport.symbol),
+                price=str(passport.tp1_price),
+                order_type="Limit", time_in_force="GTC", reduce_only=True
             )
             tp1_id = tp1_res.get("orderId")
             if tp1_id: passport.add_order_record(tp1_id, "LIMIT_TP1", "New", passport.tp1_price, float(qty_half))
             
             tp2_res = await self.rest.place_order(
                 category=self.category, symbol=symbol, side=side_exit,
-                qty=qty_half, price=str(passport.tp2_price),
-                order_type="Limit", time_in_force="GTC",
-                reduce_only=True
+                qty=self._format_qty(qty_half, passport.symbol),
+                price=str(passport.tp2_price),
+                order_type="Limit", time_in_force="GTC", reduce_only=True
             )
             tp2_id = tp2_res.get("orderId")
             if tp2_id: passport.add_order_record(tp2_id, "LIMIT_TP2", "New", passport.tp2_price, float(qty_half))
 
             trigger_dir = 2 if passport.side == "LONG" else 1
-            
             sl_res = await self.rest.place_order(
                 category=self.category, symbol=symbol, side=side_exit,
-                qty=qty_full, price="",
+                qty=self._format_qty(qty_full, passport.symbol),
+                price="", 
                 order_type="Market", 
                 trigger_price=str(passport.sl_price),
                 trigger_direction=trigger_dir,
@@ -142,27 +196,24 @@ class OrderManager:
             if sl_id: passport.add_order_record(sl_id, "STOP_SL", "New", passport.sl_price, float(qty_full))
             
             if tp1_id and tp2_id and sl_id:
-                passport.add_event("SUCCESS: PROTECTIVE_PLACED", f"Защитные ордера: TP1={tp1_id}, TP2={tp2_id}, SL={sl_id}")
-                logger.info(f"✅ [{passport.passport_id}] Защитные ордера размещены.")
+                be_txt = f", BE: {passport.be_price}" if passport.be_price else ""
+                passport.add_event("GUARD_REGISTERED", 
+                                   f"Защита выставлена. SL: {passport.sl_price}, TP1: {passport.tp1_price}, TP2: {passport.tp2_price}{be_txt}", 
+                                   source="ORDER_MANAGER")
+                if self.storage:
+                    self.storage.save(passport)
                 return True
             else:
-                passport.add_event("ERROR: PROTECTIVE_INCOMPLETE", "Не все ордера размещены")
-                logger.error(f"❌ [{passport.passport_id}] Не все защитные ордера размещены")
+                logger.error(f"❌ [{passport.passport_id}] Не все защитные ордера размещены. TP1:{bool(tp1_id)}, TP2:{bool(tp2_id)}, SL:{bool(sl_id)}")
                 return False
-            
+                
         except Exception as e:
-            passport.add_event("ERROR: PROTECTIVE_FAILED", str(e))
             logger.error(f"❌ [{passport.passport_id}] Ошибка защитных ордеров: {e}")
             return False
 
     async def move_sl_to_breakeven(self, passport: TradePassport, new_sl_price: str) -> bool:
-        """
-        Переносит SL в безубыток ТОЛЬКО на остаток позиции после TP1.
-        ✅ ИСПРАВЛЕНИЕ: Динамический расчет остатка + проверка be_price.
-        """
         try:
-            # 1. Находим и отменяем старый SL
-            current_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") == "New"), None)
+            current_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") in ("New", "Untriggered", "Active")), None)
             
             if current_sl:
                 await self.rest.cancel_order(self.category, passport.symbol, current_sl["order_id"])
@@ -170,41 +221,39 @@ class OrderManager:
                 passport.add_event("ACTION: SL_CANCELLED", f"Старый SL {current_sl['order_id']} отменен")
                 logger.info(f"🔄 [{passport.passport_id}] Старый SL отменен")
 
-            # 2. ✅ ИСПРАВЛЕНИЕ: Рассчитываем реальный остаток позиции
-            # Суммируем все исполненные take-profit ордера
             filled_tp_qty = sum(
                 o.get("qty", 0) for o in passport.orders 
                 if o.get("type") in ("LIMIT_TP1", "LIMIT_TP2") and o.get("status") == "Filled"
             )
-            remaining_qty = passport.position_size - filled_tp_qty
+            remaining_qty = float(passport.position_size) - filled_tp_qty
+            
+            safe_remaining_qty = self._round_down_qty(remaining_qty, passport.symbol)
 
-            if remaining_qty <= 0:
-                logger.warning(f"⚠️ [{passport.passport_id}] Нет остатка позиции для переноса SL")
+            if safe_remaining_qty <= 0:
+                logger.warning(f"⚠️ [{passport.passport_id}] Нет остатка позиции ({safe_remaining_qty}) для переноса SL")
                 return False
 
-            # 3. ✅ ЗАЩИТА: Если be_price в паспорте None, запрещаем перенос в классический BE
-            # (Это дублирующая защита, т.к. основная проверка теперь в position_monitor.py)
             if passport.be_price is None and float(new_sl_price) == passport.entry_price:
-                passport.add_event("WARNING: BE_SKIPPED", f"BE отключен стратегией (be_price=null). Оставляем структурный SL на {remaining_qty} SOL.")
-                logger.warning(f"⚠️ [{passport.passport_id}] BE пропущен: be_price=null. Структурный SL сохранен.")
+                passport.add_event("WARNING: BE_SKIPPED", f"BE отключен стратегией (be_price=null). Оставляем структурный SL.")
+                logger.warning(f"️ [{passport.passport_id}] BE пропущен: be_price=null. Структурный SL сохранен.")
                 return False
 
-            # 4. Выставляем новый SL на ОСТАТОК позиции
             trigger_dir = 2 if passport.side == "LONG" else 1
             
             res = await self.rest.place_order(
                 category=self.category, symbol=passport.symbol, 
                 side="Sell" if passport.side == "LONG" else "Buy",
-                qty=str(remaining_qty), price="", order_type="Market", 
+                qty=self._format_qty(safe_remaining_qty, passport.symbol),
+                price="", order_type="Market", 
                 trigger_price=new_sl_price, trigger_direction=trigger_dir,
                 reduce_only=True
             )
             
             new_sl_id = res.get("orderId")
             if new_sl_id:
-                passport.add_order_record(new_sl_id, "STOP_SL_BE", "New", float(new_sl_price), float(remaining_qty))
-                passport.add_event("SUCCESS: SL_MOVED_TO_BE", f"Новый SL выставлен по {new_sl_price} на {remaining_qty} SOL")
-                logger.info(f"✅ [{passport.passport_id}] SL перенесен в BE ({new_sl_price}) на остаток {remaining_qty} SOL.")
+                passport.add_order_record(new_sl_id, "STOP_SL_BE", "New", float(new_sl_price), float(safe_remaining_qty))
+                passport.add_event("SUCCESS: SL_MOVED_TO_BE", f"Новый SL выставлен по {new_sl_price} на {safe_remaining_qty}")
+                logger.info(f"✅ [{passport.passport_id}] SL перенесен в BE ({new_sl_price}) на остаток {safe_remaining_qty}.")
                 return True
             else:
                 passport.add_event("ERROR: NO_NEW_SL_ID", "Биржа не вернула orderId для нового SL")
@@ -213,11 +262,10 @@ class OrderManager:
             
         except Exception as e:
             passport.add_event("ERROR: MOVE_SL_FAILED", str(e))
-            logger.error(f" [{passport.passport_id}] Ошибка переноса SL: {e}")
+            logger.error(f"❌ [{passport.passport_id}] Ошибка переноса SL: {e}")
             return False
 
     async def cancel_all_protective_orders(self, passport: TradePassport) -> bool:
-        """Отменяет все активные защитные ордера при закрытии позиции."""
         cancelled_count = 0
         protective_types = ["LIMIT_TP1", "LIMIT_TP2", "STOP_SL", "STOP_SL_BE"]
         
