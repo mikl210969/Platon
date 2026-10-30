@@ -20,7 +20,6 @@ class TransitionError(Exception):
 # ТАБЛИЦА РАЗРЕШЁННЫХ ПЕРЕХОДОВ (нервная система PLATO V2)
 # ============================================================
 ALLOWED_TRANSITIONS: Dict[str, Set[str]] = {
-    # IDLE и SIGNAL_GENERATED могут прыгнуть сразу в активные состояния (страховка от гонок UDS)
     "IDLE":               {"SIGNAL_GENERATED", "ORDER_PREPARING", "ORDER_SENT", 
                            "POSITION_OPEN", "PARTIAL_FILL", "TP1_PARTIAL_CLOSE",
                            "ORDER_CANCELLED", "ORDER_REJECTED", "ERROR_STATE"},
@@ -39,11 +38,11 @@ ALLOWED_TRANSITIONS: Dict[str, Set[str]] = {
     "TP_FULL_CLOSE":      {"CLOSED"},
     "SL_TRIGGERED":       {"CLOSED"},
     "MANUAL_CLOSE":       {"CLOSED"},
-    # Терминальные состояния — выходов нет
     "CLOSED":             set(),
     "ORDER_CANCELLED":    set(),
     "ORDER_REJECTED":     set(),
-    "ERROR_STATE":        set(),
+    # ✅ ИСПРАВЛЕНО: Разрешаем аварийный выход из ошибки в CLOSED
+    "ERROR_STATE":        {"CLOSED"}, 
 }
 
 TERMINAL_STATES = {"CLOSED", "ORDER_CANCELLED", "ORDER_REJECTED", "ERROR_STATE"}
@@ -55,8 +54,7 @@ def is_terminal(status: str) -> bool:
 
 
 def generate_client_order_id(passport_id: str, signal_id: str) -> str:
-    """Уникальный ключ сопоставления UDS<->REST (правило 3 матрицы).
-    Bybit orderLinkId: до 36 символов, латиница/цифры."""
+    """Уникальный ключ сопоставления UDS<->REST (правило 3 матрицы)."""
     short_passport = passport_id.split("_")[-1] if "_" in passport_id else passport_id[:6]
     short_signal = signal_id.split("_")[-1] if "_" in signal_id else signal_id[:8]
     uid = uuid.uuid4().hex[:8]
@@ -68,7 +66,6 @@ class PassportManager:
 
     def __init__(self, passport):
         self.passport = passport
-        # Нормализуем начальный статус к каноническому
         if not getattr(self.passport, "status", None) or self.passport.status == "PENDING":
             self.passport.status = "IDLE"
         if not getattr(self.passport, "client_order_id", None):
@@ -77,15 +74,12 @@ class PassportManager:
                 getattr(self.passport, "signal_id", "") or ""
             )
 
-    # ------------------------------------------------------------
-    # ЕДИНСТВЕННЫЙ способ смены статуса
-    # ------------------------------------------------------------
     def set_state(self, new_status: str, reason: str = "",
                   details: str = "", source: str = "SYSTEM") -> bool:
         current = self.passport.status
 
         if new_status == current:
-            return False  # идемпотентность: повторный переход в то же состояние — нет-оп
+            return False
 
         allowed = ALLOWED_TRANSITIONS.get(current, set())
         if new_status not in allowed:
@@ -94,16 +88,44 @@ class PassportManager:
             logger.error(msg)
             raise TransitionError(msg)
 
-        # Применяем переход
         self.passport.status = new_status
         self._append_event(f"STATUS: {new_status}", details or reason, source)
 
-        # Терминальное состояние → фиксируем closed_at
         if is_terminal(new_status) and not getattr(self.passport, "closed_at", None):
             self.passport.closed_at = datetime.now(timezone.utc)
 
         logger.info(f"🔄 [{self.passport.passport_id}] {current} -> {new_status} | {reason}")
         return True
+
+    # ✅ НОВОЕ: Метод для аварийного закрытия (Fail-Safe)
+    def force_close(self, reason: str):
+        """Принудительное закрытие проблемного паспорта, игнорируя стандартные переходы."""
+        old_state = self.passport.status
+        if old_state == "CLOSED":
+            return
+        
+        self.passport.status = "CLOSED"
+        self.passport.close_reason = f"FORCE_CLOSED: {reason}"
+        self.passport.closed_at = datetime.now(timezone.utc)
+        
+        self._append_event("STATUS: CLOSED (FORCE)", reason, source="RECON_FIX")
+        logger.warning(f"🔧 Passport {self.passport.passport_id} FORCE_CLOSED from {old_state}. Reason: {reason}")
+
+    # ✅ НОВОЕ: Помощник для RECON, чтобы не трогать молодые ордера
+    def get_state_age_seconds(self) -> float:
+        """Возвращает время в секундах с момента последнего изменения статуса."""
+        timeline = getattr(self.passport, "timeline", [])
+        current_state = self.passport.status
+        
+        for event in reversed(timeline):
+            if event.get("event", "").startswith("STATUS:"):
+                try:
+                    ts_str = event["timestamp"].replace("Z", "+00:00")
+                    ts = datetime.fromisoformat(ts_str)
+                    return (datetime.now(timezone.utc) - ts).total_seconds()
+                except Exception:
+                    pass
+        return 0.0
 
     def _append_event(self, event: str, details: str, source: str = "SYSTEM"):
         timeline = getattr(self.passport, "timeline", None)
@@ -118,9 +140,6 @@ class PassportManager:
         })
         self.passport.updated_at = datetime.now(timezone.utc)
 
-    # ------------------------------------------------------------
-    # Удобные семантические события (не меняют статус)
-    # ------------------------------------------------------------
     def log_guard_registered(self, sl: float, tp1: float, tp2: float, be: Optional[float] = None):
         be_txt = f", BE: {be}" if be is not None else ""
         self._append_event("GUARD_REGISTERED",
@@ -135,9 +154,6 @@ class PassportManager:
                            f"Исполнение подтверждено биржей. order={order_id}, price={fill_price}, qty={qty}",
                            source="UDS")
 
-    # ------------------------------------------------------------
-    # Запрос состояния
-    # ------------------------------------------------------------
     def is_active(self) -> bool:
         return not is_terminal(self.passport.status)
 

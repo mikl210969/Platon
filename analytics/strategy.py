@@ -652,7 +652,18 @@ class AdaptiveZoneV1:
             logger.info(f"✅ [{passport.passport_id}] Ордер размещен (TTL={self.order_ttl_seconds}s, orderLinkId={passport.client_order_id}).")
             self.passport_storage.save(passport)
         else:
+            # ❌ ОШИБКА РАЗМЕЩЕНИЯ ОРДЕРА
             mgr.set_state("ORDER_REJECTED", reason="place_entry_order failed", source="STRATEGY")
             passport.add_event("ERROR: ENTRY_FAILED", "Не удалось разместить ордер", source="STRATEGY")
             logger.warning(f"⚠️ [{passport.passport_id}] Ордер не размещён → ORDER_REJECTED")
             self.passport_storage.save(passport)
+            
+            # 🔥 НОВОЕ: Инвалидируем зону немедленно
+            zone.state = "INVALIDATED"
+            self._save_zones()
+            autopsy_logger.info(json.dumps({
+                "event": "ZONE_INVALIDATED_ON_ERROR", 
+                "symbol": self.symbol, 
+                "zone_id": zone.id,
+                "reason": "order_placement_failed"
+            }))
