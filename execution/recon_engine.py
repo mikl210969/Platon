@@ -108,6 +108,10 @@ class ReconciliationEngine:
         logger.info(f"🛰️ [RECON:{reason}] pos_size={exchange_size}, open_orders={len(exchange_order_ids)}, active_passports={len(active)}")
 
         for pid, passport in list(active.items()):
+            # ✅ ЗАЩИТА ОТ ПЕРЕКРЁСТНОГО ЗАГРЯЗНЕНИЯ
+            if passport.symbol != self.symbol:
+                continue
+
             mgr = self.get_manager(passport)
             
             if mgr.current_state() == "CLOSED":
