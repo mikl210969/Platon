@@ -49,6 +49,29 @@ class PositionMonitor:
         self._get_manager(passport)
         logger.info(f"📋 [{passport.passport_id}] Паспорт добавлен в мониторинг")
 
+    async def _handle_order_rejected(self, passport_id: str, reason: str):
+        """
+        Обрабатывает отклонение ордера (например, POSITION_EXISTS или Qty invalid).
+        Переводит паспорт в ORDER_REJECTED и гарантированно удаляет его из активных словарей,
+        предотвращая появление "зомби-паспортов".
+        """
+        passport = self.active_passports.get(passport_id)
+        if not passport:
+            return
+            
+        # 1. Переводим в терминальное состояние
+        self._safe_transition(passport, "ORDER_REJECTED", reason=reason, source="SYSTEM")
+        passport.add_event("ERROR: ENTRY_FAILED", details=reason, source="SYSTEM")
+        
+        # 2. Сохраняем финальное состояние
+        self.storage.save(passport)
+        
+        # 3. ✅ КРИТИЧЕСКАЯ ОЧИСТКА: удаляем зомби из словарей мониторинга
+        self.active_passports.pop(passport_id, None)
+        self.managers.pop(passport_id, None)
+        
+        logger.warning(f"🛑 [{passport_id}] Ордер отклонен ({reason}). Паспорт закрыт и удален из мониторинга.")        
+
     def _find_passport_by_order_id(self, order_id: Optional[str]) -> Optional[TradePassport]:
         if not order_id:
             return None

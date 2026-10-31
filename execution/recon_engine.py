@@ -40,6 +40,9 @@ class ReconciliationEngine:
         
         # ✅ ДЕДУПЛИКАЦИЯ: Храним ключи обработанных фантомов
         self._known_phantoms: set = set()
+        # ✅ СЧЕТЧИКИ ДЛЯ ЗАЩИТЫ ОТ МИГАЮЩИХ ПОЗИЦИЙ (Eventual Consistency)
+        self._zero_position_cycles: dict[str, int] = {}  # passport_id -> кол-во циклов с pos_size=0
+        self._phantom_cycles: dict[str, int] = {}        # symbol_side_entry -> кол-во циклов наличия фантома
 
         self.bus.subscribe("UDS:ORDER_UPDATE", self._on_uds_activity)
         self.bus.subscribe("UDS:POSITION_UPDATE", self._on_uds_activity)
@@ -122,10 +125,24 @@ class ReconciliationEngine:
 
             known_order_ids = {o.get("order_id") for o in passport.orders if o.get("order_id")}
 
+            # ✅ R2a: Позиция на бирже исчезла (exchange_size=0)
             if mgr.is_active() and exchange_size == 0:
                 protective_alive = known_order_ids & exchange_order_ids
                 if not protective_alive:
-                    await self._finalize_from_history(passport, mgr, reason)
+                    zero_cycles = self._zero_position_cycles.get(pid, 0) + 1
+                    self._zero_position_cycles[pid] = zero_cycles
+                    
+                    # Финализируем только после 2 подтверждений (например, 60 секунд)
+                    if zero_cycles >= 2:
+                        logger.info(f"🛰️ [RECON] [{passport.passport_id}] Позиция отсутствует {zero_cycles} цикла(ов). Финализация.")
+                        await self._finalize_from_history(passport, mgr, reason)
+                        self._zero_position_cycles.pop(pid, None)
+                    else:
+                        logger.debug(f"⏳ [RECON] [{passport.passport_id}] Позиция отсутствует ({zero_cycles}/2). Ожидание подтверждения...")
+            
+            # ✅ Сброс счетчика, если позиция вернулась
+            elif mgr.is_active() and exchange_size > 0:
+                self._zero_position_cycles.pop(pid, None)
 
             if mgr.is_active() and exchange_size > 0:
                 protective_alive = known_order_ids & exchange_order_ids
@@ -157,8 +174,37 @@ class ReconciliationEngine:
             if oid not in all_known_ids:
                 await self._cancel_orphan(oid, reason)
 
+        # ✅ Фантом: позиция есть, активного паспорта нет
         if exchange_size > 0 and not any(self.get_manager(p).is_active() for p in active.values()):
-            await self._adopt_phantom(exchange_size, positions, reason)
+            pos = next((p for p in positions if p.get("symbol") == self.symbol), {})
+            side_raw = pos.get("side", "")
+            entry = float(pos.get("avgPrice", 0))
+            side = "LONG" if side_raw == "Buy" else "SHORT"
+            phantom_key = f"{self.symbol}_{side}_{entry}"
+            
+            phantom_cycles = self._phantom_cycles.get(phantom_key, 0) + 1
+            self._phantom_cycles[phantom_key] = phantom_cycles
+            
+            # Усыновляем только после 2 подтверждений
+            if phantom_cycles >= 2:
+                logger.info(f"🛰️ [RECON] Фантом {phantom_key} подтвержден {phantom_cycles} цикла(ов). Усыновление.")
+                await self._adopt_phantom(exchange_size, positions, reason)
+                self._phantom_cycles.pop(phantom_key, None)
+            else:
+                logger.debug(f"⏳ [RECON] Фантом {phantom_key} ({phantom_cycles}/2). Ожидание подтверждения...")
+        
+        # ✅ Сброс счётчиков фантомов, если позиция исчезла
+        if exchange_size == 0:
+            for key in list(self._phantom_cycles.keys()):
+                if key.startswith(f"{self.symbol}_"):
+                    self._phantom_cycles.pop(key, None)
+                    logger.debug(f"️ [RECON] Счётчик фантома {key} сброшен (позиция исчезла)")
+        
+        # ✅ Сброс счетчиков фантомов, если для этого символа появился активный паспорт
+        for key in list(self._phantom_cycles.keys()):
+            if key.startswith(f"{self.symbol}_"):
+                if any(self.get_manager(p).is_active() and p.symbol == self.symbol for p in active.values()):
+                    self._phantom_cycles.pop(key, None)
 
     async def _finalize_from_history(self, passport, mgr, reason: str):
         # ✅ ЗАЩИТА ОТ ПОВТОРНОЙ ФИНАЛИЗАЦИИ И МУСОРНОГО PNL
@@ -258,11 +304,26 @@ class ReconciliationEngine:
     async def _cancel_orphan(self, order_id: str, reason: str):
         """Отменяет ордер-сироту ТОЛЬКО после подтверждения его существования."""
         try:
-            # ✅ ПРОВЕРКА СУЩЕСТВОВАНИЯ ОРДЕРА ПЕРЕД ОТМЕНОЙ
-            order_info = await self.rest.get_order_info(self.category, self.symbol, order_id)
+            # ✅ ИСПРАВЛЕНО: используем существующий метод get_order
+            order_result = await self.rest.get_order(self.category, self.symbol, order_id)
             
-            if not order_info or order_info.get("orderStatus") in ("Cancelled", "Filled", "Rejected"):
-                logger.info(f"🛰️ [RECON] Ордер {order_id} уже не активен (статус={order_info.get('orderStatus') if order_info else 'None'}). Пропуск отмены.")
+            # Bybit возвращает структуру {"result": {"list": [...]}} или напрямую список
+            order_info = None
+            if isinstance(order_result, dict):
+                result = order_result.get("result", order_result)
+                if isinstance(result, dict):
+                    order_list = result.get("list", [])
+                    if isinstance(order_list, list) and order_list:
+                        order_info = order_list[0]
+                    else:
+                        order_info = result
+                elif isinstance(result, list) and result:
+                    order_info = result[0]
+            
+            order_status = order_info.get("orderStatus") if order_info else None
+            
+            if not order_info or order_status in ("Cancelled", "Filled", "Rejected"):
+                logger.info(f"🛰️ [RECON] Ордер {order_id} уже не активен (статус={order_status}). Пропуск отмены.")
                 return
             
             # Только если ордер реально активен — отменяем
@@ -270,7 +331,6 @@ class ReconciliationEngine:
             logger.warning(f"🛰️ [RECON] Ордер-сирота отменён: {order_id} ({reason})")
             
         except Exception as e:
-            # Если ордер не найден (404) или другая ошибка — считаем его несуществующим
             error_msg = str(e).lower()
             if "not found" in error_msg or "10001" in error_msg or "order not exist" in error_msg:
                 logger.info(f"🛰️ [RECON] Ордер {order_id} не существует на бирже. Пропуск.")

@@ -1,0 +1,212 @@
+Вот финальное, технически выверенное ТЗ для интеграции мультивалютности в платформу PLATO. Оно учитывает текущий статус сбора данных (Background Recorder) и жестко фиксирует параметры "Золотого Стандарта".
+
+Копируй этот блок целиком и передавай разработчикам/основному чату.
+
+***
+
+# 📜 ТЗ: Интеграция Мультивалютного Пула (v1.0 Core Universe)
+
+## 0. Контекст
+Стратегия `AdaptiveZoneV1` (Structure Mode) валидирована на SOLUSDT (+36% P&L, WR 63%, PF 3.0).
+Цель задачи — масштабировать эту логику на пул из 7 инструментов без изменения математического ядра стратегии.
+**Важно:** Исторические данные для всех 7 монет собираются параллельным процессом (`background_recorder.py`) в папке `C:\Users\ongul\YandexDisk\data_new`. Код должен быть готов к запуску бэктеста сразу после окончания сбора.
+
+---
+
+## 1. Архитектура Инициализации (Factory Pattern)
+
+Необходимо отказаться от глобальных констант в классе `AdaptiveZoneV1`. Каждый экземпляр стратегии должен получать свой конфигурационный объект при создании.
+
+### 1.1. Структура Конфига (`config/instruments.yaml`)
+Создать файл конфигурации со следующей структурой:
+
+```yaml
+global_settings:
+  exit_logic: "structure"       # Фиксировано для всего пула
+  target_risk_usdt: 30.0        # Риск на сделку ($)
+  max_total_portfolio_risk: 150.0 # Глобальный лимит риска ($)
+  commission_rate: 0.0004       # Bybit taker/maker mix
+  
+instruments:
+  SOLUSDT:
+    enabled: true
+    min_wall_value_usd: 50000   # Эквивалент ~1000 SOL @ $50
+    k_atr_departure: 1.5
+    max_departure_pct: 4.0
+    
+  BTCUSDT:
+    enabled: true
+    min_wall_value_usd: 750000  # Высокий порог ликвидности
+    k_atr_departure: 2.0        # Биток инертен, нужен больший откат
+    max_departure_pct: 4.0
+    
+  ETHUSDT:
+    enabled: true
+    min_wall_value_usd: 200000
+    k_atr_departure: 1.8
+    max_departure_pct: 4.0
+    
+  BNBUSDT:
+    enabled: true
+    min_wall_value_usd: 200000  # Отсечение технического объема биржи
+    k_atr_departure: 1.6
+    max_departure_pct: 4.0
+    
+  XRPUSDT:
+    enabled: true
+    min_wall_value_usd: 100000
+    k_atr_departure: 1.7
+    max_departure_pct: 4.0
+    
+  LINKUSDT:
+    enabled: true
+    min_wall_value_usd: 80000
+    k_atr_departure: 1.6
+    max_departure_pct: 4.0
+    
+  AVAXUSDT:
+    enabled: true
+    min_wall_value_usd: 60000
+    k_atr_departure: 1.5
+    max_departure_pct: 4.0
+```
+
+### 1.2. Логика загрузки
+В модуле запуска (`main.py` или `bootstrap.py`):
+1. Прочитать `instruments.yaml`.
+2. Для каждого символа с `enabled: true`:
+   - Создать экземпляр `MarketBuffer(symbol)`.
+   - Создать экземпляр `StatisticsEngine(symbol)` (изолированное окно EMA).
+   - Создать экземпляр `AdaptiveZoneV1(event_bus, symbol, config_dict)`.
+3. Подключить все компоненты к общему `EventBus`, используя префиксы событий по символу (например, `MARKET:SNAPSHOT:SOLUSDT`).
+
+---
+
+## 2. Модификация Ядра Стратегии (AdaptiveZoneV1)
+
+Изменить метод `_on_snapshot` и детекцию зон для поддержки динамических порогов.
+
+### 2.1. Детекция Зоны (Wall Detection)
+Заменить проверку `if bid_v_1 > WALL_FLOOR:` на расчет стоимости стены в USD.
+
+```python
+# Псевдокод внутри _process_zones
+current_price = snapshot['current_price']
+bid_vol = snapshot['walls']['bid_v1_max']
+ask_vol = snapshot['walls']['ask_v1_max']
+
+# Расчет стоимости стен
+bid_wall_usd = bid_vol * current_price
+ask_wall_usd = ask_vol * current_price
+
+# Порог из конфига конкретного инструмента
+threshold_usd = self.config['min_wall_value_usd']
+
+# LONG Zone
+if bid_wall_usd > threshold_usd:
+    create_zone(side='LONG', reference_price=current_price, ...)
+
+# SHORT Zone
+if ask_wall_usd > threshold_usd:
+    create_zone(side='SHORT', reference_price=current_price, ...)
+```
+
+### 2.2. Откат (Departure Logic)
+Использовать `k_atr_departure` из конфига текущего инструмента.
+
+```python
+atr_5m = snapshot['atr_5m'] # Должен считаться изолированным StatisticsEngine этого символа
+min_dep_abs = self.config['k_atr_departure'] * atr_5m
+max_dep_abs = zone.reference_price * (self.config['max_departure_pct'] / 100.0)
+
+# ... остальная логика DEPARTED/INVALIDATED без изменений ...
+```
+
+### 2.3. Фильтры Входа
+Остаются неизменными (Delta < 0 для LONG, Delta > 0 для SHORT, Imbalance < 0.30), но применяются к данным конкретного символа.
+
+---
+
+## 3. Глобальный Контроллер Риска (GlobalRiskManager)
+
+Новый модуль, который перехватывает сигналы перед отправкой ордера. Он обеспечивает безопасность портфеля при работе 7 движков одновременно.
+
+### 3.1. Интерфейс
+```python
+class GlobalRiskManager:
+    def __init__(self, max_total_risk_usdt: float):
+        self.max_risk = max_total_risk_usdt
+        self.current_open_risk = 0.0
+        self.active_positions = {} # {trade_id: risk_amount}
+
+    async def request_trade_approval(self, trade_id: str, calculated_risk_usdt: float) -> bool:
+        """
+        Вызывается стратегией перед выставлением ордера.
+        Возвращает True, если риск разрешен.
+        """
+        if (self.current_open_risk + calculated_risk_usdt) <= self.max_risk:
+            self.current_open_risk += calculated_risk_usdt
+            self.active_positions[trade_id] = calculated_risk_usdt
+            return True
+        else:
+            logger.warning(f"REJECTED_BY_GLOBAL_RISK: Trade {trade_id}. Current Risk: ${self.current_open_risk:.2f}, Max: ${self.max_risk}")
+            return False
+
+    async def release_trade_capacity(self, trade_id: str):
+        """
+        Вызывается при закрытии позиции (TP/SL/TTL/Manual).
+        Освобождает лимит риска.
+        """
+        if trade_id in self.active_positions:
+            self.current_open_risk -= self.active_positions.pop(trade_id)
+```
+
+### 3.2. Интеграция
+В методе `_execute_signal` стратегии `AdaptiveZoneV1`:
+1. Рассчитать `qty` и `actual_risk_usdt`.
+2. Позвать `await global_risk_manager.request_trade_approval(signal_id, actual_risk_usdt)`.
+3. Если вернулось `False` — прервать выполнение, залогировать отказ, **НЕ менять состояние зоны** (или сбросить её в `DEPARTED`, чтобы попробовать позже, когда освободится капитал).
+
+---
+
+## 4. Требования к Данным и Бэктестингу
+
+После того как `background_recorder.py` соберет минимум 3–5 дней данных для всех 7 монет:
+
+1.  **Написать скрипт `multicoin_backtester.py`:**
+    *   Загружает CSV из `data_new/{SYMBOL}/`.
+    *   Эмулирует работу `StatisticsEngine` для каждого символа отдельно.
+    *   Прогоняет логику `AdaptiveZoneV1` (Structure Mode) последовательно или параллельно.
+    *   Учитывает `GlobalRiskManager` (симуляция конкуренции за капитал между монетами).
+
+2.  **Метрики успеха:**
+    *   Суммарный Net P&L портфеля > 0.
+    *   Win Rate каждого символа не ниже 50% (кроме BTC, где сделок мало).
+    *   Profit Factor портфеля > 1.5.
+    *   Ни один сигнал не был потерян из-за ошибки парсинга формата Binance/Bybit (проверка совместимости колонок CSV).
+
+---
+
+## 5. Чек-лист Внедрения (Для разработчика)
+
+- [ ] Создать файл `config/instruments.yaml` с параметрами из раздела 1.1.
+- [ ] Рефакторинг `AdaptiveZoneV1.__init__`: принимать `config_dict` вместо глобальных констант.
+- [ ] Реализовать расчет `wall_value_usd` в детекции зон.
+- [ ] Создать класс `GlobalRiskManager` и внедрить его в EventBus.
+- [ ] Обновить `OrderExecutor`: вызывать `release_trade_capacity` при любом закрытии ордера/позиции.
+- [ ] Написать unit-тесты для `GlobalRiskManager` (проверка блокировки при превышении лимита).
+- [ ] Подготовить заглушку для чтения данных из `data_new` для будущего бэктеста.
+
+---
+
+## 6. Что НЕ делать (Запреты)
+
+1.  **НЕ менять формулу SL/TP.** Только Structure-based.
+2.  **НЕ использовать один общий StatisticsEngine** для всех монет. Каждая монета имеет свою волатильность и объем. Окна должны быть изолированы.
+3.  **НЕ игнорировать GlobalRiskManager.** Без него 7 монет могут открыть 7 позиций одновременно, что приведет к риску $210+ ($30 * 7), что может быть критично для депозита.
+4.  **НЕ добавлять новые монеты в конфиг до получения исторических данных.** Сначала сбор, потом калибровка, потом live.
+
+***
+
+**Инструкция для команды:**
+Начинайте с пункта 1.1 (Конфиг) и 3.1 (Риск-менеджер). Это фундамент. После этого адаптируйте стратегию под чтение конфига. Сбор данных уже идет в фоне, ждать его завершения для написания кода не нужно.

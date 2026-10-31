@@ -4,11 +4,17 @@ python main.py | Tee-Object -FilePath platform_run.log -Append
 # 1. Добавляем все изменения в индекс
 git add .
 
+git add analytics/statistics_engine.py
+git commit -m "fix: resolve deadlock in StatisticsEngine._on_snapshot + add error handling for thresholds creation"
+git push origin feature/bybit-demo-adapter
+
 # 2. Делаем коммит
 git commit -m "Cleanup: Removed debug spam (BTC SPOT, Passport diagnostic) for night test"
 
 # 3. Отправляем в удаленный репозиторий
 git push origin feature/v12-analytics
+
+
 
 
 
