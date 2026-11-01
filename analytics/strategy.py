@@ -377,7 +377,6 @@ class AdaptiveZoneV1:
         is_in_zone = zone.price * 0.995 <= current_price <= zone.price * 1.005
         
         if not is_in_zone:
-            # ✅ Зона не в коридоре — просто выходим, без логов (ждем возврата)
             return None
 
         # ✅ Проверка таймаута устаревания зоны
@@ -386,7 +385,6 @@ class AdaptiveZoneV1:
         zone_age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(zone.timestamp)).total_seconds()
         
         if zone_age_seconds > max_age_seconds:
-            # ✅ ФИНАЛЬНАЯ СВОДКА: пишем ZONE_ANALYSIS ОДИН РАЗ при инвалидации
             wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 2.0)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
@@ -453,7 +451,7 @@ class AdaptiveZoneV1:
         if exit_mode == "structure":
             atr_5m = self.current_snapshot.get("atr_5m", 0.1) if self.current_snapshot else 0.1
             
-            # ✅ 1. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ (синхронизировано с созданием через МЕДИАНА)
+            # ✅ 1. ПРОВЕРКА ПУЛЕНЕПРОБИВАЕМОСТИ СТЕНЫ
             wall_mult = self.config.get("trading.structure_validation.wall_volume_multiple", 2.0)
             median_bid = getattr(thresholds, 'wall_median_bid', thresholds.wall_threshold)
             median_ask = getattr(thresholds, 'wall_median_ask', thresholds.wall_threshold)
@@ -479,7 +477,7 @@ class AdaptiveZoneV1:
                 required_strength = safe_med_ask * wall_mult
                 if zone.volume < required_strength:
                     if not zone.rejection_logged:
-                        logger.info(f"️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {required_strength:.0f}")
+                        logger.info(f"⚠️ [{zone.id}] Structure signal rejected: weak wall volume {zone.volume:.0f} < {required_strength:.0f}")
                         zone.rejection_logged = True
                         autopsy_logger.info(json.dumps({
                             "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
@@ -567,14 +565,6 @@ class AdaptiveZoneV1:
                 tp2_price = current_price - (sl_distance * 3.0)
                 be_price = current_price * 0.999
 
-        # === ФИЛЬТР ДЕЛЬТЫ ===
-        if zone.side == "LONG":
-            if zone_delta_sum >= thresholds.delta_threshold_long:
-                return None
-        else:
-            if zone_delta_sum <= thresholds.delta_threshold_short:
-                return None
-
         # === ДИНАМИЧЕСКИЙ САЙЗИНГ ===
         TARGET_RISK_USDT = 30.0
         MAX_POSITION_SIZE = 10.0
@@ -586,6 +576,43 @@ class AdaptiveZoneV1:
         actual_risk_usdt = round(sl_dist_usd * final_qty, 2)
         delta_formatted = round(zone_delta_sum, 2)
 
+        # === ПРОВЕРКА ПОЛОЖИТЕЛЬНОГО МАТЕМАТИЧЕСКОГО ОЖИДАНИЯ (Positive EV) ===
+        commission_rate = self.config.get("trading.structure_validation.commission_rate", 0.0004)
+        safety_margin = self.config.get("trading.filters.positive_ev.safety_margin", 1.5)
+        
+        # Расчет валовой прибыли при достижении TP1 (для 50% позиции)
+        tp1_qty = final_qty * 0.5
+        gross_profit_tp1 = tp1_qty * abs(tp1_price - current_price)
+        
+        # Расчет комиссий: Вход (полный лот) + Выход по TP1 (половина лота)
+        notional_entry = current_price * final_qty
+        notional_exit_tp1 = tp1_price * tp1_qty
+        est_commission = (notional_entry + notional_exit_tp1) * commission_rate
+        
+        required_profit = est_commission * safety_margin
+        
+        if gross_profit_tp1 < required_profit:
+            logger.warning(f"⚠️ [{zone.id}] Signal blocked by Positive EV Filter: "
+                           f"GP=${gross_profit_tp1:.2f} < Req=${required_profit:.2f} "
+                           f"(Comm=${est_commission:.2f}, Margin={safety_margin})")
+            autopsy_logger.info(json.dumps({
+                "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
+                "reason": "positive_ev_filter_failed", 
+                "gp_usd": round(gross_profit_tp1, 2), 
+                "req_usd": round(required_profit, 2),
+                "commission": round(est_commission, 2)
+            }))
+            return None
+
+        # === ФИЛЬТР ДЕЛЬТЫ ===
+        if zone.side == "LONG":
+            if zone_delta_sum >= thresholds.delta_threshold_long:
+                return None
+        else:
+            if zone_delta_sum <= thresholds.delta_threshold_short:
+                return None
+
+        # === ЛОГИРОВАНИЕ И ВОЗВРАТ СИГНАЛА ===
         autopsy_logger.info(json.dumps({
             "event": "EXIT_LOGIC_APPLIED", "symbol": self.symbol, "zone_id": zone.id, 
             "mode": exit_mode, "sl_price": round(sl_price, 4), 

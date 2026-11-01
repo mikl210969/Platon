@@ -10,6 +10,9 @@ bybit:
   # mainnet: https://api.bybit.com
 
 trading:
+  filters:
+    positive_ev:
+      safety_margin: 1.5
   symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"] # Мультивалютность v1.0
   category: "linear"
   
@@ -17,7 +20,7 @@ trading:
   
   # ✅ ПОЛНЫЙ РАЗДЕЛ: Валидация структуры и Умный TP2
   structure_validation:
-    wall_volume_multiple: 1.0          # ⚠️ ВРЕМЕННО: Было 4.0. Снижено до 3.0 для E2E теста пайплайна.
+    wall_volume_multiple: 2.5          # ⚠️ ВРЕМЕННО: Было 4.0. Снижено до 3.0 для E2E теста пайплайна.
     wall_baseline_bars: 28             # Окно для расчёта медианы объёма
     min_retracement_atr_multiplier: 1.5 # Минимальный откат 1.5 × ATR(5m)
     
