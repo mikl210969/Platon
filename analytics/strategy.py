@@ -502,6 +502,17 @@ class AdaptiveZoneV1:
                 
                 sl_buffer_atr = self.config.get("trading.structure_validation.sl_buffer_atr5m", 1.0)
                 sl_price = min_extremum - (atr_5m * sl_buffer_atr)
+                
+                # ✅ SANITY CHECK: SL для LONG обязан быть строго ниже текущей цены
+                if sl_price >= current_price:
+                    logger.warning(f"⚠️ [{zone.id}] Signal rejected: Calculated SL ({sl_price:.2f}) >= current price ({current_price:.2f}) for LONG")
+                    autopsy_logger.info(json.dumps({
+                        "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
+                        "reason": "sl_above_entry_long", "sl_price": round(sl_price, 4), 
+                        "current_price": round(current_price, 4), "min_extremum": round(min_extremum, 4)
+                    }))
+                    return None
+                
                 sl_distance = abs(current_price - sl_price)
                 
                 tp1_mult = self.config.get("trading.structure_validation.tp1_risk_multiple", 1.5)
@@ -522,6 +533,17 @@ class AdaptiveZoneV1:
                 
                 sl_buffer_atr = self.config.get("trading.structure_validation.sl_buffer_atr5m", 1.0)
                 sl_price = max_extremum + (atr_5m * sl_buffer_atr)
+                
+                # ✅ SANITY CHECK: SL для SHORT обязан быть строго выше текущей цены
+                if sl_price <= current_price:
+                    logger.warning(f"⚠️ [{zone.id}] Signal rejected: Calculated SL ({sl_price:.2f}) <= current price ({current_price:.2f}) for SHORT")
+                    autopsy_logger.info(json.dumps({
+                        "event": "SIGNAL_REJECTED", "symbol": self.symbol, "zone_id": zone.id,
+                        "reason": "sl_below_entry_short", "sl_price": round(sl_price, 4), 
+                        "current_price": round(current_price, 4), "max_extremum": round(max_extremum, 4)
+                    }))
+                    return None
+                
                 sl_distance = abs(current_price - sl_price)
                 
                 tp1_mult = self.config.get("trading.structure_validation.tp1_risk_multiple", 1.5)
