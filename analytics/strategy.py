@@ -17,6 +17,7 @@ from pathlib import Path
 
 from core.event_bus import EventBus
 from execution.passport_manager import PassportManager, generate_client_order_id
+from .delta_tracker import ZoneDeltaTracker
 
 if TYPE_CHECKING:
     from execution.order_manager import OrderManager
@@ -85,6 +86,14 @@ class AdaptiveZoneV1:
         self.zones_file = Path(f"logs/active_zones_{self.symbol}.json")
         self.zones_file.parent.mkdir(exist_ok=True)
         self._load_zones()
+
+        # ✅ НОВОЕ: Инициализация трекера дельты
+        self.delta_tracker = ZoneDeltaTracker()
+        
+        self.bus.subscribe("ANALYTICS:THRESHOLDS", self._on_thresholds)
+        self.bus.subscribe(f"MARKET:SNAPSHOT:{self.symbol}", self._on_snapshot)
+        self.bus.subscribe(f"MARKET:TICK:{self.symbol}", self._on_tick) # ✅ НОВОЕ
+        self.bus.subscribe("ORDER:TIMER_CANCELLED_WITH_ZONE", self._on_timer_cancelled)
 
         self.bus.subscribe("ANALYTICS:THRESHOLDS", self._on_thresholds)
         self.bus.subscribe(f"MARKET:SNAPSHOT:{self.symbol}", self._on_snapshot)
@@ -172,6 +181,15 @@ class AdaptiveZoneV1:
         delta_5m = delta.get("windows", {}).get(300, {}).get("velocity", 0.0)
         await self._process_zones(current_price, bid_v1_max, ask_v1_max, delta_5m)
 
+    async def _on_tick(self, tick: Dict[str, Any]):
+        """Обрабатывает тики для накопления дельты в активных зонах."""
+        signed_qty = tick.get("signed_qty", 0.0)
+        
+        # Обновляем дельту только для зон, которые ждут возврата или уже в сделке
+        for zone in self.active_zones:
+            if zone.state in ("DEPARTED", "ACTIVE_TRADE"):
+                self.delta_tracker.add_tick(zone.id, signed_qty)
+
     async def _on_timer_cancelled(self, payload: Dict[str, Any]):
         zone_id = payload.get("zone_id")
         if not zone_id:
@@ -248,6 +266,7 @@ class AdaptiveZoneV1:
                 candles_buffer=[{"close": current_price, "low": current_price * 0.998, "delta": delta_5m}]
             )
             zones.append(zone)
+            self.delta_tracker.register_zone(zone_id)
             self._save_zones()
             
             autopsy_logger.info(json.dumps({
@@ -275,6 +294,7 @@ class AdaptiveZoneV1:
                 candles_buffer=[{"close": current_price, "high": current_price * 1.002, "delta": delta_5m}]
             )
             zones.append(zone)
+            self.delta_tracker.register_zone(zone_id)
             self._save_zones()
             
             autopsy_logger.info(json.dumps({
@@ -315,6 +335,7 @@ class AdaptiveZoneV1:
         if zones_to_remove:
             for z in zones_to_remove:
                 zones.remove(z)
+                self.delta_tracker.unregister_zone(z.id)
             self._save_zones()
 
     def _check_departure(self, zone: AnomalyZone, current_price: float):
@@ -428,8 +449,8 @@ class AdaptiveZoneV1:
             }))
             return None
 
-        # 2. Сумма дельты за буфер
-        zone_delta_sum = sum(c.get("delta", 0.0) for c in zone.candles_buffer)
+        # ✅ НОВОЕ: Берем точную кумулятивную дельту из трекера
+        zone_delta_sum = self.delta_tracker.get_delta(zone.id)
         
         # 3. ✅ ПРОВЕРКА СПРЕДА СПОТ/ФЬЮЧЕРС
         futures_price = await self._get_futures_price(self.symbol)

@@ -1,0 +1,27 @@
+⚠️ Шаг 1: Убить ВСЕ зависшие процессы Python (КРИТИЧНО)
+Get-Process python, pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
+Write-Host "✅ Все процессы Python остановлены." -ForegroundColor Green
+
+🧹 Шаг 2: Очистка байт-кода Python (__pycache__)
+
+Get-ChildItem -Path . -Filter "__pycache__" -Recurse -Directory | Remove-Item -Recurse -Force
+Get-ChildItem -Path . -Filter "*.pyc" -Recurse -File | Remove-Item -Force
+Write-Host "✅ Кэш компиляции Python (__pycache__) очищен." -ForegroundColor Green
+
+
+🗑️ Шаг 3: Очистка временных данных приложения (ОПЦИОНАЛЬНО, но рекомендуется)
+Внимание: это удалит текущие логи и файлы паспортов. Если тебе нужна история для отчёта, пропусти этот шаг или сделай резервную копию папки data\passports.
+
+# Очистка файлов логов (папка останется)
+Get-ChildItem -Path "logs" -Filter "*.log" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+
+# Очистка файлов паспортов (ВНИМАНИЕ: удаляет историю сделок!)
+Get-ChildItem -Path "data\passports" -Filter "*.json" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+
+Write-Host "✅ Логи и файлы паспортов очищены." -ForegroundColor Green
+
+🔄 Шаг 4: Перезапуск окружения и платформы
+Теперь, когда система чиста, заново активируй виртуальное окружение и запусти платформу:
+
+& d:\platform\Platon_GoldenBounce\venv\Scripts\Activate.ps1
+Write-Host "✅ Окружение активировано. Можно запускать платформу." -ForegroundColor Cyan

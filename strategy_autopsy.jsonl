@@ -1,0 +1,43 @@
+{"event": "ZONE_CREATED", "symbol": "SOLUSDT", "zone_id": "GB_20261107_1804_78f55c", "price": 89.76, "volume": 676.0493, "side": "LONG", "atr": 0.06785714285714205, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.73, "reason": "dedup"}
+{"event": "ZONE_CREATED", "symbol": "ETHUSDT", "zone_id": "GB_20261107_1804_718ce1", "price": 2235.32, "volume": 24.07198, "side": "LONG", "atr": 1.3049999999999662, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.83, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.35, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.44, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2235.21, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2235.18, "reason": "dedup"}
+{"event": "ZONE_CREATED", "symbol": "SOLUSDT", "zone_id": "GB_20261107_1805_2b6dd0", "price": 89.87, "volume": 679.4299, "side": "SHORT", "atr": 0.06571428571428482, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.7, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.79, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.86, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.92, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.9, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.88, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.85, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.78, "reason": "dedup"}
+{"event": "ZONE_CREATED", "symbol": "SOLUSDT", "zone_id": "GB_20261107_1806_577554", "price": 89.59, "volume": 890.1075, "side": "LONG", "atr": 0.06571428571428482, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.79, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.74, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.83, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.84, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.82, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2235.06, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.72, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.77, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.67, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2235.48, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.92, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.91, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.75, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.91, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2237.28, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2236.84, "reason": "dedup"}
+{"event": "ZONE_CREATED", "symbol": "SOLUSDT", "zone_id": "GB_20261107_1808_931dc6", "price": 89.48, "volume": 2007.2336, "side": "LONG", "atr": 0.06571428571428482, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.8, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.88, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "ETHUSDT", "price": 2237.08, "reason": "dedup"}
+{"event": "SIGNAL_REJECTED", "symbol": "SOLUSDT", "zone_id": "GB_20261107_1808_931dc6", "reason": "positive_ev_failed", "gp_usd": 4.93, "req_usd": 11.08}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.89, "reason": "dedup"}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.82, "reason": "dedup"}
+{"event": "ZONE_CREATED", "symbol": "ETHUSDT", "zone_id": "GB_20261107_1809_da5c32", "price": 2238.02, "volume": 38.6041, "side": "SHORT", "atr": 1.2235714285714039, "k_wall": 2.0}
+{"event": "ZONE_REJECTED", "symbol": "SOLUSDT", "price": 89.9, "reason": "dedup"}

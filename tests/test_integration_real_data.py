@@ -13,7 +13,7 @@ pytestmark = pytest.mark.asyncio
 def real_link_data():
     """Загружает реальные исторические данные LINKUSDT."""
     # ✅ ИСПРАВЛЕННЫЙ ПУТЬ (латиницей)
-    data_path = Path(r"C:\Users\ongul\YandexDisk\data_new\LINKUSDT")
+    data_path = Path(r"C:\Users\user\YandexDisk\data_new\LINKUSDT")
     
     if not data_path.exists():
         pytest.skip(f"Папка с данными не найдена: {data_path}")

@@ -63,7 +63,11 @@ class BybitPublicWSClient:
                                         "data": payload
                                     })
                                 elif topic.startswith("publicTrade"):
+                                    # ✅ СУЩЕСТВУЮЩАЯ ЛОГИКА (не трогаем)
                                     await self.bus.publish(f"PUBLIC:TRADES:{self.symbol}", payload)
+                                    # ✅ НОВОЕ: Дублируем в EVENT:TAP для WallTracker
+                                    trades = payload if isinstance(payload, list) else [payload]
+                                    await self.bus.publish(f"EVENT:TAP:{self.symbol}", trades)
                                 elif topic.startswith("kline"):
                                     await self.bus.publish(f"PUBLIC:KLINE:{self.symbol}", {"topic": topic, "data": payload})
                                     
