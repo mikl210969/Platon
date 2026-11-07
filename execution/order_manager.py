@@ -1,7 +1,8 @@
 """
 Менеджер ордеров. Отправляет, модифицирует и отменяет ордера на бирже.
-✅ ИСПРАВЛЕНО: Универсальное округление и ФОРМАТИРОВАНИЕ количества (Qty) до шага биржи 
-для 100% предотвращения ошибок "Qty invalid" и "truncated to zero" из-за floating point.
+Универсальное округление и ФОРМАТИРОВАНИЕ количества (Qty) до шага биржи.
+ВОЛНА 1: hard-guard (ордера + позиция, fail-closed).
+ВОЛНА 1.5: жизнь ордера = жизнь зоны; отмена с тремя состояниями гонки.
 """
 import logging
 import math
@@ -72,11 +73,82 @@ class OrderManager:
             logger.error(f"❌ Ошибка проверки позиции: {e}")
             return False
 
+    # === ВОЛНА 1.5: отмена входа с тремя состояниями ===
+    async def cancel_entry_order(self, passport, reason: str) -> str:
+        """Отменить висящий входной ордер. Возвращает одно из:
+        CANCELLED / FILLED / PENDING / NO_ORDER.
+        Гонка cancel-vs-fill трактуется как ШТАТНЫЙ исход, не как exception."""
+        entry = None
+        for o in passport.orders:
+            if o.get("type") == "LIMIT_ENTRY" and o.get("status") in ("New", "PartiallyFilled"):
+                entry = o
+        if entry is None:
+            return "NO_ORDER"
+
+        order_id = entry["order_id"]
+        passport.cancel_source = reason
+
+        try:
+            await self.rest.cancel_order(
+                category=self.category, symbol=passport.symbol, order_id=order_id
+            )
+            state = "CANCELLED"
+        except Exception as e:
+            # Отмена не прошла: скорее всего гонка (ордер уже исполнен,
+            # Bybit вернёт OrderNotFound/already-filled). Смотрим факт на бирже.
+            state = await self._query_order_state(passport.symbol, order_id)
+            if state == "FILLED":
+                logger.warning(f"⚠️ [{passport.passport_id}] Гонка cancel-vs-fill: ордер {order_id} исполнился до отмены — позицию подхватывает monitor")
+            elif state == "PENDING":
+                logger.warning(f"⚠️ [{passport.passport_id}] Отмена {order_id} не подтверждена (PENDING) — сверка через UDS/RECON")
+            else:
+                logger.info(f"[{passport.passport_id}] Отмена {order_id}: состояние биржи {state} ({e})")
+
+        passport.add_event("ACTION: ENTRY_CANCEL", f"{reason} → {state}", source="ORDER_MANAGER")
+        logger.info(f"🛑 [{passport.passport_id}] Отмена входа: reason={reason}, state={state}")
+        return state
+
+    async def _query_order_state(self, symbol: str, order_id: str) -> str:
+        """Фактическое состояние ордера на бирже: FILLED / CANCELLED / PENDING."""
+        try:
+            resp = await self.rest._request(
+                "GET", "/v5/order/history",
+                {"category": self.category, "symbol": symbol, "orderId": order_id},
+                signed=True,
+            )
+            lst = resp.get("list") or []
+            if not lst:
+                resp = await self.rest._request(
+                    "GET", "/v5/order/realtime",
+                    {"category": self.category, "symbol": symbol, "orderId": order_id},
+                    signed=True,
+                )
+                lst = resp.get("list") or []
+                if lst:
+                    st = (lst[0].get("orderStatus") or "").upper()
+                    return "PENDING" if st in ("NEW", "PARTIALLYFILLED", "UNTRIGGERED") else st
+                return "PENDING"
+            st = (lst[0].get("orderStatus") or "").upper()
+            if st in ("FILLED", "PARTIALLYFILLED"):
+                return "FILLED"
+            if st in ("CANCELLED", "REJECTED", "DEACTIVATED"):
+                return "CANCELLED"
+            return "PENDING"
+        except Exception:
+            return "PENDING"
+
     async def place_entry_order(self, passport, limit_price: str, 
-                                timeout_seconds: int = 30, 
+                                timeout_seconds: int = 600, 
                                 order_link_id: Optional[str] = None,
                                 zone_id: Optional[str] = None):
         try:
+            # === ВОЛНА 1: hard-guard по правде биржи (fail-closed) ===
+            guard_code = await self._entry_guard_check(passport.symbol)
+            if guard_code:
+                passport.add_event("ERROR: ENTRY_GUARD", guard_code)
+                logger.error(f"❌ [{passport.passport_id}] Hard guard: {guard_code}")
+                return False
+
             has_position = await self.has_open_position(passport.symbol)
             if has_position:
                 passport.add_event("ERROR: POSITION_EXISTS", f"Уже есть открытая позиция по {passport.symbol}")
@@ -132,6 +204,8 @@ class OrderManager:
                 )
 
                 logger.info(f"✅ [{passport.passport_id}] Вход размещен. Order ID: {order_id}, TTL: {timeout_seconds}s")
+                # Сохраняем паспорт сразу после размещения ордера (без задержки)
+                self._save_passport_json(passport)
                 return True
             else:
                 passport.add_event("ERROR: NO_ORDER_ID", "Биржа не вернула orderId")
@@ -143,9 +217,74 @@ class OrderManager:
             logger.error(f"❌ [{passport.passport_id}] Ошибка входа: {e}")
             return False
 
+    async def _entry_guard_check(self, symbol: str):
+        """ВОЛНА 1: hard-guard по правде биржи. Возвращает код отказа или None.
+        ОБЕ проверки (позиция и входные ордера) живут в ОДНОМ try:
+        fail-closed общий — любой сбой REST => CHECK_FAILED."""
+        try:
+            # ПРОВЕРКА 1: открытая позиция по символу
+            pos_resp = await self.rest._request(
+                "GET", "/v5/position/list",
+                {"category": self.category, "symbol": symbol},
+                signed=True,
+            )
+            for pos in (pos_resp.get("list") or []):
+                if float(pos.get("size", 0) or 0) != 0:
+                    logger.warning(f"🛡️ [GUARD] {symbol}: открыта позиция {pos.get('size')} → POSITION_OPEN")
+                    return "ENTRY_GUARD: POSITION_OPEN"
+
+            # ПРОВЕРКА 2: открытые ВХОДНЫЕ ордера.
+            ord_resp = await self.rest._request(
+                "GET", "/v5/order/realtime",
+                {"category": self.category, "symbol": symbol, "openOnly": 1},
+                signed=True,
+            )
+            orders_list = ord_resp.get("list") or []
+            logger.info(f"🛡️ [GUARD] {symbol}: найдено {len(orders_list)} открытых ордеров")
+            
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ КАЖДОГО ОРДЕРА
+            for i, o in enumerate(orders_list):
+                order_id = o.get("orderId", "Unknown")
+                reduce_only = o.get("reduceOnly", False)
+                order_status = o.get("orderStatus", "Unknown")
+                side = o.get("side", "Unknown")
+                order_link_id = o.get("orderLinkId", "")
+                
+                logger.info(f"🛡️ [GUARD] Ордер #{i+1}: id={order_id}, side={side}, reduceOnly={reduce_only}, status={order_status}, linkId={order_link_id}")
+                
+                # Входные ордера: не reduceOnly и активный статус
+                if not reduce_only and order_status in ("New", "PartiallyFilled", "Untriggered"):
+                    logger.warning(f"🛡️ [GUARD] {symbol}: открытый входной ордер {order_id} → PENDING_EXISTS")
+                    return "ENTRY_GUARD: PENDING_EXISTS"
+
+        except Exception as e:
+            logger.error(f"🛡️ [GUARD] {symbol}: REST-проверка не прошла ({e}) — fail-closed отказ")
+            return "ENTRY_GUARD: CHECK_FAILED"
+
+        return None
+
+    def _save_passport_json(self, passport: TradePassport):
+        """Сохранить паспорт в data/passports/<PASS_ID>_<SYMBOL>.json"""
+        try:
+            import json
+            from pathlib import Path
+            
+            passports_dir = Path("data/passports")
+            passports_dir.mkdir(parents=True, exist_ok=True)
+            
+            filename = f"{passport.passport_id}_{passport.symbol}.json"
+            filepath = passports_dir / filename
+            
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(passport.to_dict(), f, indent=2, ensure_ascii=False, default=str)
+            
+            logger.info(f"💾 [{passport.passport_id}] Passport saved to {filepath}")
+            
+        except Exception as e:
+            logger.error(f"❌ [{passport.passport_id}] Failed to save passport JSON: {e}", exc_info=True)
+
     async def place_protective_orders(self, passport: TradePassport) -> bool:
         try:
-            # ✅ ПОСЛЕДНЯЯ ЛИНИЯ ОБОРОНЫ: Блокировка если паспорт закрывается
             if getattr(passport, 'is_closing', False):
                 logger.info(f"🛑 Blocked protective orders for {passport.passport_id}: Passport is closing (source={getattr(passport, 'closing_source', 'UNKNOWN')}).")
                 return False
@@ -202,6 +341,10 @@ class OrderManager:
                                    source="ORDER_MANAGER")
                 if self.storage:
                     self.storage.save(passport)
+                
+                # ✅ Сохраняем паспорт в JSON для анализа
+                self._save_passport_json(passport)
+                
                 return True
             else:
                 logger.error(f"❌ [{passport.passport_id}] Не все защитные ордера размещены. TP1:{bool(tp1_id)}, TP2:{bool(tp2_id)}, SL:{bool(sl_id)}")

@@ -99,6 +99,7 @@ class TradePassport:
     # === Состояние (канонические статусы passport_manager) ===
     status: str = "IDLE"
     exit_reason: str = ""
+    cancel_source: Optional[str] = None   # SELF_TIMER / SELF_ZONE_INVALIDATION / EXCHANGE / USER
     exit_price: float = 0.0
 
     # === P&L (только два канонических поля прибыли) ===
@@ -115,7 +116,7 @@ class TradePassport:
     # === Чёрный ящик ===
     timeline: List[Dict[str, Any]] = field(default_factory=list)
 
-    # ✅ НОВОЕ: Защита от гонок состояний между UDS и RECON
+    # Защита от гонок состояний между UDS и RECON
     is_closing: bool = False
     closing_source: str = ""  # "UDS", "MANUAL", "RECON_TIMEOUT"
 
@@ -207,6 +208,7 @@ class TradePassport:
             "timeline": self.timeline,
             # выход и PnL
             "exit_reason": self.exit_reason,
+            "cancel_source": self.cancel_source,
             "exit_price": self.exit_price,
             "gross_pnl": self.gross_pnl,
             "commission": self.commission,
@@ -215,7 +217,7 @@ class TradePassport:
             "tp2_pnl": self.tp2_pnl,
             "sl_pnl": self.sl_pnl,
             "sizing_info": self.sizing_info,
-            # ✅ НОВОЕ: Поля состояния закрытия
+            # Поля состояния закрытия
             "is_closing": self.is_closing,
             "closing_source": self.closing_source,
         }

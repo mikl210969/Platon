@@ -3,37 +3,27 @@
 bybit:
   use_testnet: false
   use_demo: true
-  
-  # URL выбирается автоматически на основе флагов выше
-  # testnet: https://api-testnet.bybit.com
-  # demo: https://api-demo.bybit.com
-  # mainnet: https://api.bybit.com
 
 trading:
   filters:
     positive_ev:
       safety_margin: 1.5
-  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"] # Мультивалютность v1.0
+  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"]
   category: "linear"
-  
   exit_logic: "structure"
   
-  # ✅ ПОЛНЫЙ РАЗДЕЛ: Валидация структуры и Умный TP2
   structure_validation:
-    wall_volume_multiple: 2.5          # ⚠️ ВРЕМЕННО: Было 4.0. Снижено до 3.0 для E2E теста пайплайна.
-    wall_baseline_bars: 28             # Окно для расчёта медианы объёма
-    min_retracement_atr_multiplier: 1.5 # Минимальный откат 1.5 × ATR(5m)
-    
-    # 🔑 РАЗДЕЛЬНЫЕ ТАЙМЕРЫ (физика рынка):
-    departure_max_bars: 24             # Время на поиск ОТКАТА (до 2 часов). Если цена не ушла — зона протухла.
-    return_max_bars: 24                # Время на ВОЗВРАТ после отката (до 2 часов). Откат быстрый, возврат тоже должен быть быстрым.
-    
-    sl_buffer_atr5m: 1.0               # Буфер SL = 1.0 × ATR(5m) от экстремума
-    tp1_risk_multiple: 1.5             # TP1 = entry ± (risk_dist × 1.5)
-    tp2_risk_multiple: 3.0             # TP2 = entry ± (risk_dist × 3.0)
-    post_tp1_logic: "tp2_protect"      # Логика после TP1 (перенос SL на TP2 + буфер)
-    tp2_protection_buffer_mult: 3.0    # Множитель для расчёта буфера комиссий
-    commission_rate: 0.0004            # 0.04% (комиссия Bybit)
+    wall_volume_multiple: 1.5
+    wall_baseline_bars: 28
+    min_retracement_atr_multiplier: 1.5
+    departure_max_bars: 24
+    return_max_bars: 24
+    sl_buffer_atr5m: 1.0
+    tp1_risk_multiple: 1.5
+    tp2_risk_multiple: 3.0
+    post_tp1_logic: "tp2_protect"
+    tp2_protection_buffer_mult: 3.0
+    commission_rate: 0.0004
   
   risk:
     base_risk_usdt: 30.0
@@ -41,33 +31,92 @@ trading:
     max_daily_loss: 100.0
   
   orders:
-    breakeven_after_tp1: false         # Отключено, так как работает post_tp1_logic
-    planned_size: 10.0                 # Для динамического сайзинга
-    order_ttl_seconds: 120             # Умный таймер
+    breakeven_after_tp1: false
+    planned_size: 10.0
+    order_ttl_seconds: 120
+
+  strategies:
+    golden_bounce:
+      # === СЕССИОННЫЕ МНОЖИТЕЛИ (UTC) ===
+      session_multipliers:
+        asian_night:   # 00:00 - 06:00
+          k_wall: 2.5
+          k_atr_sl_buffer: 1.0
+          k_atr_retracement: 1.2
+          k_delta: 0.8
+        asian:         # 06:00 - 12:00
+          k_wall: 2.0
+          k_atr_sl_buffer: 1.0
+          k_atr_retracement: 1.5
+          k_delta: 1.0
+        european:      # 12:00 - 20:00
+          k_wall: 1.8
+          k_atr_sl_buffer: 1.2
+          k_atr_retracement: 1.5
+          k_delta: 1.2
+        american:      # 20:00 - 00:00
+          k_wall: 1.5
+          k_atr_sl_buffer: 1.5
+          k_atr_retracement: 1.5
+          k_delta: 1.5
+
+      # === REGIME SHIFT ===
+      regime_shift:
+        min_atr_ratio: 0.5
+        max_atr_ratio: 2.0
+
+      # === HEALTH & GUARDS ===
+      health:
+        min_atr_bps: 20
+        dead_market_hysteresis_sec: 600
+        zone_dedup_atr_mult: 1.5
+        zone_dedup_min_pct: 0.001
+        signal_cooldown_sec: 300
+        max_active_per_symbol: 1
+        max_zone_age_sec: 1200
+        max_passports_per_hour: 10
+        max_zones_per_hour: 60
+        entry_order_ttl_sec: 600
+
+      # === WALL PERSISTENCE ===
+      wall_persistence:
+        min_consecutive_ticks: 2
+        detect_window_sec: 1.0
+        same_wall_price_tolerance_ticks: 5
+        min_wall_duration_sec: 2.0
+        half_life_sec: 25
+        partial_fill_min_ratio: 0.25
+        min_timeout_sec: 3
+        max_timeout_sec: 8
+        tape_window_ms: 400
+        tape_price_tolerance_ticks: 3
+        refill_ttl_sec: 60
+        refill_boost_per_event: 0.25
+        refill_boost_max: 2.0
+        pull_cycle_demerit: 0.5
+        max_pull_cycles: 3
+
+      # === ENTRY OFFSET (НОВОЕ: Шаг 1 для улучшения fill rate) ===
+      entry_offset_ticks: 2
 
 # ✅ СПЕЦИФИЧЕСКИЕ ПАРАМЕТРЫ ПО ИНСТРУМЕНТАМ
 instruments:
   SOLUSDT:
     enabled: true
-    min_wall_value_usd: 50000          # LOCKED: Работает как есть
-    
+    min_wall_value_usd: 50000
   LINKUSDT:
     enabled: true
-    min_wall_value_usd: 80000          # ADD: Звезда шоу (+22%, PF 3.75)
-    
+    min_wall_value_usd: 80000
   ETHUSDT:
     enabled: true
-    min_wall_value_usd: 120000         # TUNE: Снижено с 200k для увеличения потока
-    
-  BTCUSDT:
-    enabled: false                     # DROP: Нет edge на L1
-    
-  BNBUSDT:
-    enabled: false                     # TEST: Ждем данных
     min_wall_value_usd: 120000
-    
+  BTCUSDT:
+    enabled: false
+  BNBUSDT:
+    enabled: false
+    min_wall_value_usd: 120000
   AVAXUSDT:
-    enabled: false                     # TEST: Ждем данных
+    enabled: false
     min_wall_value_usd: 60000
 
 self_test:
@@ -83,5 +132,5 @@ logging:
 system:
   startup_test: "none"
   test_trades_count: 10
-  signal_source: "off"                 # "off" = только сбор данных и реальные сигналы
-  shadow_mode: false                   # false = боевой режим (ордера улетают на демо-биржу)
+  signal_source: "off"
+  shadow_mode: false
