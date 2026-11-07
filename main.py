@@ -270,7 +270,47 @@ async def main():
             else:
                 logger.info(f"🎯 [{symbol}] Стратегия работает в БОЕВОМ режиме")
 
-        await stop_event.wait()
+        strategies = {}
+        for symbol in active_symbols:
+            # === СТАРАЯ СТРАТЕГИЯ (не трогаем) ===
+            strategy = AdaptiveZoneV1(
+                event_bus=bus,
+                rest_client=rest,
+                order_manager=om,
+                passport_storage=storage,
+                position_monitor=monitor,
+                shadow_mode=shadow_mode,
+                config=config,
+                symbol=symbol
+            )
+            strategies[symbol] = strategy
+            
+            if shadow_mode:
+                logger.info(f"👻 [{symbol}] Стратегия работает в ТЕНЕВОМ режиме")
+            else:
+                logger.info(f"🎯 [{symbol}] Стратегия работает в БОЕВОМ режиме")
+
+            # === НОВАЯ СТРАТЕГИЯ GOLDEN BOUNCE ===
+            try:
+                from analytics.golden_bounce.strategy import GoldenBounceStrategy
+                
+                gb_strategy = GoldenBounceStrategy(
+                    event_bus=bus,
+                    order_manager=om,
+                    passport_storage=storage,
+                    position_monitor=monitor,
+                    market_buffer=market_buffers.get(symbol),
+                    config=config,  # type: ignore[arg-type]
+                    symbol=symbol
+                )
+                # Сохраняем как отдельный ключ, чтобы не затереть старую
+                strategies[f"{symbol}_gb"] = gb_strategy
+                
+                logger.info(f"✨ [{symbol}] GoldenBounceStrategy инициализирована")
+            except Exception as e:
+                logger.warning(f"⚠️ [{symbol}] Не удалось инициализировать GoldenBounceStrategy: {e}")
+
+        await stop_event.wait()                
 
     finally:
         logger.info("🛑 Остановка платформы...")
