@@ -77,38 +77,36 @@ class GBZone:
             return self.price + actual_distance
 
     def check_departure(self, current_price: float, atr_multiplier: float = 1.5) -> bool:
-        """Проверить, произошел ли откат на 1.5×ATR (но не более 4%)."""
+        """Проверяет откат. ВАЖНО: позволяет extreme_price обновляться до реального дна/вершины."""
         if self.status != ZoneStatus.CONFIRMED:
+            # Если уже в откате, продолжаем обновлять экстремум
+            if self.status == ZoneStatus.DEPARTED and self.extreme_price is not None:
+                if self.side == "bid" and current_price < self.extreme_price:
+                    self.extreme_price = current_price
+                elif self.side == "ask" and current_price > self.extreme_price:
+                    self.extreme_price = current_price
             return False
 
-        threshold = self.calculate_departure_threshold(atr_multiplier)
+        distance = atr_multiplier * self.atr_at_creation
+        max_distance_pct = self.price * 0.04
+        actual_distance = min(distance, max_distance_pct)
+
+        threshold = self.price - actual_distance if self.side == "bid" else self.price + actual_distance
         passed = False
 
-        if self.side == "bid":  # LONG: цена должна уйти ВНИЗ ниже порога
-            if current_price <= threshold:
-                passed = True
-        else:  # SHORT: цена должна уйти ВВЕРХ выше порога
-            if current_price >= threshold:
-                passed = True
+        if self.side == "bid" and current_price <= threshold:
+            passed = True
+        elif self.side == "ask" and current_price >= threshold:
+            passed = True
 
         if passed:
             self.departure_threshold = threshold
-            self.extreme_price = current_price
             self.status = ZoneStatus.DEPARTED
             self.departure_confirmed_at = datetime.now(timezone.utc)
-            self.high_price = self.price  # Точка начала отката — это цена самой стены
-            return True
+            self.high_price = self.price  # Точка начала отката
+            self.extreme_price = current_price # Инициализируем экстремум
 
-        # Обновляем экстремум во время ожидания отката
-        if self.extreme_price is None:
-            self.extreme_price = current_price
-        else:
-            if self.side == "bid" and current_price < self.extreme_price:
-                self.extreme_price = current_price
-            elif self.side == "ask" and current_price > self.extreme_price:
-                self.extreme_price = current_price
-
-        return False
+        return passed
 
     def update_cumulative_delta(self, signed_delta: float):
         """✅ НОВОЕ: Накопление кумулятивной дельты с момента создания зоны."""
@@ -127,7 +125,7 @@ class GBZone:
                 self.absorption_score = abs(self.delta_pullback) / normalized_range
 
     def check_return(self, current_price: float) -> bool:
-        """Проверить возврат в коридор ±0.5% от стены."""
+        """Проверяет возврат в коридор ±0.5% от стены."""
         if self.status != ZoneStatus.DEPARTED or self.extreme_price is None:
             return False
 
@@ -136,7 +134,7 @@ class GBZone:
             return False
         self._last_return_check = now
 
-        return_window = self.price * self.return_window_pct
+        return_window = self.price * self.return_window_pct # 0.005
 
         if self.side == "bid":  # LONG: цена возвращается ВВЕРХ к стене
             if current_price >= (self.price - return_window):
@@ -159,29 +157,38 @@ class GBZone:
         now = now or datetime.now(timezone.utc)
         return (now - self.departure_confirmed_at).total_seconds() > self.return_ttl_seconds
 
-    def calculate_sl_tp(self, sl_buffer_mult: float = 1.0, tp1_mult: float = 1.5, tp2_mult: float = 3.0) -> Optional[dict]:
-        """SL от ЭКСТРЕМУМА отката; TP1/TP2 по кратным риска."""
-        if self.atr_at_creation <= 0 or self.extreme_price is None:
+    def calculate_sl_tp(self, current_entry_price: float) -> Optional[dict]:
+        """
+        ✅ ИСПРАВЛЕНО: Расчет на основе РЕАЛЬНОЙ департуры (Structure Mode), как в бэктесте PF 7.06.
+        """
+        if self.extreme_price is None or self.price is None:
             return None
 
-        risk = sl_buffer_mult * self.atr_at_creation
-        buffer = risk * 0.2  # Буфер 0.2% от риска для SL
+        # Расстояние, которое цена прошла от стены до экстремума (и которое должна пройти обратно)
+        departure_abs = abs(self.price - self.extreme_price)
+        
+        # Буфер 0.2% от цены экстремума (как в бэктесте)
+        buffer = self.extreme_price * 0.002 
 
-        if self.side == "bid":  # LONG: стоп ниже экстремума отката
+        if self.side == "bid":  # LONG
             sl = self.extreme_price - buffer
-            tp1 = self.price + (tp1_mult * risk)
-            tp2 = self.price + (tp2_mult * risk)
-        else:  # SHORT: стоп выше экстремума отката
+            tp1 = current_entry_price + (departure_abs * 0.5)
+            tp2 = current_entry_price + departure_abs
+        else:  # SHORT
             sl = self.extreme_price + buffer
-            tp1 = self.price - (tp1_mult * risk)
-            tp2 = self.price - (tp2_mult * risk)
+            tp1 = current_entry_price - (departure_abs * 0.5)
+            tp2 = current_entry_price - departure_abs
+
+        # ✅ ИСПРАВЛЕНО: Риск считается как реальное расстояние до SL в долларах за 1 единицу
+        risk_per_unit = abs(current_entry_price - sl)
 
         return {
-            "entry": self.price,
+            "entry": current_entry_price,      # ✅ Вход по цене возврата, а не стены!
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
-            "risk": risk,
+            "risk_per_unit": risk_per_unit,    # ✅ Для корректного динамического сайзинга
+            "departure_abs": departure_abs     # Для логирования и отладки
         }
 
     def to_dict(self) -> dict:

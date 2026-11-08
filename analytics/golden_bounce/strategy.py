@@ -315,7 +315,6 @@ class GoldenBounceStrategy:
     async def _evaluate_signal(self, zone: GBZone, current_price: float):
         now = datetime.now(timezone.utc)
         multipliers = self._get_session_multipliers()
-        k_delta = multipliers.get("k_delta", 1.0)
 
         if self._last_signal_attempt is not None:
             since = (now - self._last_signal_attempt).total_seconds()
@@ -335,9 +334,7 @@ class GoldenBounceStrategy:
             await self._invalidate_zone(zone, "WALL_GONE" if wall_status == "GONE" else "WALL_CONSUMED")
             return
 
-        # === ПРОВЕРКА КУМУЛЯТИВНОЙ ДЕЛЬТЫ (ГЛАВНЫЙ ФИЛЬТР PF 7.06) ===
-        # Для LONG (bid стена): ждем ОТРИЦАТЕЛЬНУЮ дельту (цена падала, толпа продавала, стена поглотила)
-        # Для SHORT (ask стена): ждем ПОЛОЖИТЕЛЬНУЮ дельту (цена росла, толпа покупала, стена раздала)
+        # === ПРОВЕРКА КУМУЛЯТИВНОЙ ДЕЛЬТЫ (ЕДИНСТВЕННЫЙ ФИЛЬТР PF 7.06) ===
         delta_direction_ok = (zone.side == "bid" and zone.cumulative_delta < 0) or \
                              (zone.side == "ask" and zone.cumulative_delta > 0)
         
@@ -345,20 +342,13 @@ class GoldenBounceStrategy:
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong cumulative delta direction (CumDelta: {zone.cumulative_delta:.2f})")
             return
 
-        # === ПРОВЕРКА СИЛЫ МОМЕНТУМА ЧЕРЕZ Z-СКОР ===
-        z_threshold = 1.5 * k_delta 
-        is_significant_z = abs(zone.delta_z_score) >= z_threshold
-        
-        if not is_significant_z:
-            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} weak recent momentum (Z: {zone.delta_z_score:.2f} < {z_threshold:.2f})")
-            return  # ✅ РАСКОММЕНТИРОВАНО: блокируем сигналы со слабым Z-скором
+        # ✅ ИСПРАВЛЕНО: Убран жесткий return по Z-Score. Он молча убивал сигналы.
+        # Оставляем только логирование для наблюдения.
+        if abs(zone.delta_z_score) < 1.0:
+            logger.debug(f"👀 [{self.symbol}] Zone {zone.id} weak Z-score ({zone.delta_z_score:.2f}), but proceeding based on CumDelta.")
 
-        sv = self.config.get("trading", {}).get("structure_validation", {})
-        sl_buf = sv.get("sl_buffer_atr5m", 1.0) * multipliers.get("k_atr_sl_buffer", 1.0)
-        tp1_mult = sv.get("tp1_risk_multiple", 1.5)
-        tp2_mult = sv.get("tp2_risk_multiple", 3.0)
-
-        levels = zone.calculate_sl_tp(sl_buf, tp1_mult, tp2_mult)
+        # ✅ ИСПРАВЛЕНО: Передаем current_price как цену входа для расчета структурных уровней
+        levels = zone.calculate_sl_tp(current_price)
         if levels is None:
             self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "invalid_risk"})
             return
@@ -379,17 +369,30 @@ class GoldenBounceStrategy:
             
             risk_usd = self.config.get("trading", {}).get("risk", {}).get("base_risk_usdt", 30.0)
             max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 10.0)
+            min_size = self.config.get("trading", {}).get("risk", {}).get("min_position_size", 0.1)
             
-            size = risk_usd / levels["risk"] if levels["risk"] > 0 else 0.0
+            # ✅ ИСПРАВЛЕНО: Правильный динамический сайзинг на основе реального расстояния до SL
+            risk_per_unit = levels.get("risk_per_unit", 0.0)
+            
+            if risk_per_unit > 0:
+                size = risk_usd / risk_per_unit
+            else:
+                logger.error(f"🚫 [{self.symbol}] Zero risk_per_unit. Aborting.")
+                return
+
             if size > max_size:
                 logger.warning(f"[{self.symbol}] Size {size:.2f} capped to max {max_size}")
                 size = max_size
-            if size <= 0: 
-                logger.error(f"🚫 [{self.symbol}] Invalid size calculated: {size}. Risk: {levels['risk']}")
+            
+            if size < min_size:
+                logger.warning(f"[{self.symbol}] Size {size:.2f} below min {min_size}. Aborting.")
                 return
 
-            # === POSITIVE EV FILTER ===
-            fee_rate = 0.0002  # Реальная комиссия Bybit для maker
+            # Пересчитываем реальный риск после применения лимитов
+            actual_risk_usdt = risk_per_unit * size
+
+            # ✅ ИСПРАВЛЕНО: Консервативная оценка комиссии (Taker 0.0004), так как вход может быть с проскальзыванием
+            fee_rate = 0.0004  
             notional_entry = levels["entry"] * size
             notional_exit_tp1 = levels["tp1"] * (size * 0.5)
             est_commission = (notional_entry + notional_exit_tp1) * fee_rate
@@ -408,9 +411,7 @@ class GoldenBounceStrategy:
                 return
 
             # === АДАПТИВНЫЙ BE ===
-            actual_risk_usdt = abs(levels["entry"] - levels["sl"]) * size
             target_profit_usdt = est_commission + (actual_risk_usdt * 0.03)
-            
             price_offset = target_profit_usdt / size
             be_price = levels["entry"] + price_offset if zone.trade_side == "LONG" else levels["entry"] - price_offset
 
