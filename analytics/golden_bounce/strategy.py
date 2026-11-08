@@ -345,14 +345,13 @@ class GoldenBounceStrategy:
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong cumulative delta direction (CumDelta: {zone.cumulative_delta:.2f})")
             return
 
-        # Дополнительная проверка силы через Z-скор (опционально, можно убрать если мешает)
+        # === ПРОВЕРКА СИЛЫ МОМЕНТУМА ЧЕРЕZ Z-СКОР ===
         z_threshold = 1.5 * k_delta 
         is_significant_z = abs(zone.delta_z_score) >= z_threshold
         
         if not is_significant_z:
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} weak recent momentum (Z: {zone.delta_z_score:.2f} < {z_threshold:.2f})")
-            # Можно убрать этот return, если хочешь входить ТОЛЬКО по кумулятивной дельте
-            # return 
+            return  # ✅ РАСКОММЕНТИРОВАНО: блокируем сигналы со слабым Z-скором
 
         sv = self.config.get("trading", {}).get("structure_validation", {})
         sl_buf = sv.get("sl_buffer_atr5m", 1.0) * multipliers.get("k_atr_sl_buffer", 1.0)
