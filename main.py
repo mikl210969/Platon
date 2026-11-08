@@ -2,6 +2,7 @@
 PLATO V2 — Точка входа. Фаза 2: сбор рыночных данных и аналитика.
 V2: добавлен Reconciliation Engine (сверка биржа<->паспорт) и канонические статусы.
 ✅ МУЛЬТИВАЛЮТНОСТЬ: Поддержка списка символов из конфига.
+✅ V3: ОЧИЩЕНО. Оставлена только стратегия GoldenBounce.
 """
 import json 
 import asyncio
@@ -48,7 +49,7 @@ async def signal_generator(rest, om, monitor, storage, interval_seconds: int = 1
         current_price = float(ticker['list'][0]['lastPrice'])
 
         passport = TradePassport(
-            signal_id=f"SIGNAL_{trade_counter:03d}", strategy="AdaptiveZoneV1",
+            signal_id=f"SIGNAL_{trade_counter:03d}", strategy="GoldenBounce", # Обновлено
             signal_source=SignalSource.TEST, symbol="SOLUSDT", side=current_side,
             planned_size=7.0, position_size=7.0, entry_price=current_price,
             tp1_price=current_price * 1.005 if current_side == "LONG" else current_price * 0.995,
@@ -66,11 +67,8 @@ async def signal_generator(rest, om, monitor, storage, interval_seconds: int = 1
             passport.add_event("ACTION: ENTRY_PLACED", f"Лимитный ордер размещен по {limit_price}")
             await asyncio.sleep(60)
 
-            # V2: канонические статусы стейт-машины
             st = passport.status
             if st in ("IDLE", "SIGNAL_GENERATED", "ORDER_PREPARING", "ORDER_SENT", "ORDER_PENDING"):
-                # Ордер не исполнился за TTL — монитор/таймер уже перевели в ORDER_CANCELLED;
-                # если нет — фиксируем здесь
                 if st not in ("ORDER_CANCELLED",):
                     passport.add_event("TIMER: EXPIRED", "Ордер не исполнился за 60 сек")
                 logger.info(f"⏱️ [{passport.passport_id}] Статус={st}. Переход к следующему.")
@@ -112,7 +110,7 @@ async def main():
     secrets_file = Path("secrets.json")
     if not secrets_file.exists():
         logger.error("❌ ОШИБКА: Файл secrets.json не найден! Создай его на основе secrets.example.json")
-        sys.exit(1)  # ✅ Убран локальный import sys
+        sys.exit(1)
         
     with open(secrets_file, 'r', encoding='utf-8') as f:
         secrets = json.load(f)
@@ -120,25 +118,25 @@ async def main():
     bybit_cfg = secrets.get("bybit", {})
     api_key = bybit_cfg.get("api_key")
     api_secret = bybit_cfg.get("api_secret")
-    use_demo = bybit_cfg.get("use_demo", True) # Берем из secrets для консистентности
+    use_demo = bybit_cfg.get("use_demo", True)
 
     if not api_key or not api_secret:
         logger.error("❌ ОШИБКА: API ключи пусты в secrets.json. Проверь файл.")
-        sys.exit(1)  # ✅ Убран локальный import sys
+        sys.exit(1)
         
     logger.info("✅ Секреты успешно и безопасно загружены из secrets.json")
 
     bus = EventBus()
     storage = PassportStorage("data/passports")
 
-    # ✅ 2. ИСПОЛЬЗУЕМ БЕЗОПАСНЫЕ ПЕРЕМЕННЫЕ (а не config.get)
+    # ✅ 2. ИСПОЛЬЗУЕМ БЕЗОПАСНЫЕ ПЕРЕМЕННЫЕ
     rest_url = "https://api-demo.bybit.com" if use_demo else "https://api-testnet.bybit.com"
     ws_url = "wss://stream-demo.bybit.com/v5/private" if use_demo else "wss://stream-testnet.bybit.com/v5/private"
 
     rest = BybitRestClient(api_key, api_secret, rest_url)
     uds = BybitPrivateWSClient(api_key, api_secret, ws_url, bus)
 
-    # ✅ ОБЩИЙ ORDER MANAGER И MONITOR (работают с любым символом через passport.symbol)
+    # ✅ ОБЩИЙ ORDER MANAGER И MONITOR
     om = OrderManager(rest, category="linear", event_bus=bus)
     monitor = PositionMonitor(config, bus, om, storage)
 
@@ -170,8 +168,7 @@ async def main():
         
         logger.info(f"📡 Подписка на публичные данные: {symbol}")
 
-    # V2: Reconciliation Engine (источник истины биржа<->паспорт)
-    # ✅ ОТДЕЛЬНЫЙ RECON ДЛЯ КАЖДОГО СИМВОЛА
+    # V2: Reconciliation Engine
     recons = []
     for symbol in active_symbols:
         recon = ReconciliationEngine(
@@ -192,17 +189,14 @@ async def main():
         logger.info("🚀 Запуск компонентов...")
         uds_task = asyncio.create_task(uds.connect())
         
-        # Запускаем все публичные WS
         public_ws_tasks = [asyncio.create_task(ws.connect()) for ws in public_ws_clients]
 
-        # ✅ ЕДИНСТВЕННЫЙ REST-ЗАПРОС ДЛЯ РЫНКА: загрузка истории свечей для всех символов
         for symbol, mb in market_buffers.items():
             await mb.bootstrap_atr(rest, "spot", symbol)
             await mb.start()
 
         logger.info("🔄 Проверка наличия открытых позиций...")
         try:
-            # ✅ ИСПРАВЛЕНО: Bybit требует symbol или settleCoin при запросе списка позиций
             positions = await rest._request("GET", "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}, signed=True)
             for pos in positions.get("list", []):
                 sym = pos.get("symbol")
@@ -211,11 +205,9 @@ async def main():
         except Exception as e:
             logger.error(f"❌ Ошибка проверки позиций: {e}")
 
-        # V2: запуск RECON сразу после восстановления соединений (стартовая сверка R1 внутри)
         for recon in recons:
             await recon.start()
 
-        # ✅ Переключатель источника сигналов
         signal_source = config.get("system.signal_source", "off")
         if signal_source == "random":
             asyncio.create_task(signal_generator(rest, om, monitor, storage, interval_seconds=180))
@@ -234,88 +226,50 @@ async def main():
         logger.info("✅ Платформа работает. Сбор публичных данных активен.")
         logger.info("💡 Смотри в логе блоки '🔍 [MarketBuffer]' каждые 30 сек")
 
-        # ✅ Запуск стратегии ДЛЯ КАЖДОГО СИМВОЛА
+        # ✅ ЗАПУСК ЕДИНСТВЕННОЙ АКТИВНОЙ СТРАТЕГИИ (GOLDEN BOUNCE)
         from analytics.statistics_engine import StatisticsEngine
-        from analytics.strategy import AdaptiveZoneV1
+        from analytics.golden_bounce.strategy import GoldenBounceStrategy
 
         shadow_mode = config.get("system.shadow_mode", True)
         
-        # ✅ ОТДЕЛЬНЫЙ STATISTICS ENGINE ДЛЯ КАЖДОГО СИМВОЛА
         stats_engines = {}
         for symbol in active_symbols:
             stats_engine = StatisticsEngine(
                 event_bus=bus, 
                 window_size=100, 
                 min_observations=60,
-                symbol=symbol  # ← Передаем символ
+                symbol=symbol
             )
             stats_engines[symbol] = stats_engine
         
         strategies = {}
         for symbol in active_symbols:
-            strategy = AdaptiveZoneV1(
-                event_bus=bus,
-                rest_client=rest,
-                order_manager=om,
-                passport_storage=storage,
-                position_monitor=monitor,
-                shadow_mode=shadow_mode,
-                config=config,
-                symbol=symbol
-            )
-            strategies[symbol] = strategy
-            
-            if shadow_mode:
-                logger.info(f"👻 [{symbol}] Стратегия работает в ТЕНЕВОМ режиме")
-            else:
-                logger.info(f"🎯 [{symbol}] Стратегия работает в БОЕВОМ режиме")
-
-        strategies = {}
-        for symbol in active_symbols:
-            # === СТАРАЯ СТРАТЕГИЯ (не трогаем) ===
-            strategy = AdaptiveZoneV1(
-                event_bus=bus,
-                rest_client=rest,
-                order_manager=om,
-                passport_storage=storage,
-                position_monitor=monitor,
-                shadow_mode=shadow_mode,
-                config=config,
-                symbol=symbol
-            )
-            strategies[symbol] = strategy
-            
-            if shadow_mode:
-                logger.info(f"👻 [{symbol}] Стратегия работает в ТЕНЕВОМ режиме")
-            else:
-                logger.info(f"🎯 [{symbol}] Стратегия работает в БОЕВОМ режиме")
-
-            # === НОВАЯ СТРАТЕГИЯ GOLDEN BOUNCE ===
             try:
-                from analytics.golden_bounce.strategy import GoldenBounceStrategy
-                
                 gb_strategy = GoldenBounceStrategy(
                     event_bus=bus,
                     order_manager=om,
                     passport_storage=storage,
                     position_monitor=monitor,
                     market_buffer=market_buffers.get(symbol),
-                    config=config,  # type: ignore[arg-type]
+                    config=config,
                     symbol=symbol
                 )
-                # Сохраняем как отдельный ключ, чтобы не затереть старую
-                strategies[f"{symbol}_gb"] = gb_strategy
+                strategies[symbol] = gb_strategy
                 
-                logger.info(f"✨ [{symbol}] GoldenBounceStrategy инициализирована")
+                if shadow_mode:
+                    logger.info(f"👻 [{symbol}] GoldenBounceStrategy работает в ТЕНЕВОМ режиме")
+                else:
+                    logger.info(f"🎯 [{symbol}] GoldenBounceStrategy работает в БОЕВОМ режиме")
+                    
             except Exception as e:
-                logger.warning(f"⚠️ [{symbol}] Не удалось инициализировать GoldenBounceStrategy: {e}")
+                logger.error(f"❌ [{symbol}] Критическая ошибка инициализации GoldenBounceStrategy: {e}", exc_info=True)
 
         await stop_event.wait()                
 
     finally:
         logger.info("🛑 Остановка платформы...")
         for recon in recons:
-            await recon.stop()           # V2: сначала останавливаем сверку
+            await recon.stop()
         for mb in market_buffers.values():
             await mb.stop()
         for ws in public_ws_clients:
