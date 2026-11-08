@@ -1,6 +1,6 @@
 """
 Golden Bounce Strategy. 
-Версия: Сессионные множители, REGIME_SHIFT, Z-скор дельты (исправленный), адаптивный BE.
+Версия: Golden Bounce & Retest (PF 7.06). Кумулятивная дельта, инвертированная логика поглощения, 48ч TTL.
 """
 
 import logging
@@ -61,7 +61,7 @@ class GoldenBounceStrategy:
         self.active_zones: List[GBZone] = []
         self.atr_multiplier = self.config.get("trading", {}).get("structure_validation", {}).get("min_retracement_atr_multiplier", 1.5)
         
-        # ✅ ИСПРАВЛЕНО: Единый буфер для экземпляра (экземпляр привязан к одному символу)
+        # Единый буфер для расчета Z-скора (скользящее окно для метрик)
         self.delta_buffer: List[tuple] = []
         self.delta_window_sec = 60
         self.delta_short_window_sec = 15
@@ -74,7 +74,7 @@ class GoldenBounceStrategy:
         self.zone_dedup_min_pct = float(health.get("zone_dedup_min_pct", 0.001))
         self.signal_cooldown_sec = float(health.get("signal_cooldown_sec", 300))
         self.max_active_per_symbol = int(health.get("max_active_per_symbol", 1))
-        self.max_zone_age_sec = float(health.get("max_zone_age_sec", 1200))
+        # ✅ УБРАНО: max_zone_age_sec больше не используется, зоны живут 48ч
         self.max_passports_per_hour = int(health.get("max_passports_per_hour", 10))
         self.max_zones_per_hour = int(health.get("max_zones_per_hour", 60))
         self.entry_order_ttl_sec = float(health.get("entry_order_ttl_sec", 600))
@@ -94,7 +94,7 @@ class GoldenBounceStrategy:
         self.bus.subscribe(f"PUBLIC:ORDERBOOK:{symbol}", self._on_orderbook)
         self.bus.subscribe("ORDER:TIMER_CANCELLED", self._on_timer_cancelled)
 
-        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (Sessions + Regime Shift + Z-Score)")
+        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (Bounce & Retest | Cumulative Delta)")
 
     # =================================================================
     # СЕССИОННАЯ ЛОГИКА
@@ -192,7 +192,8 @@ class GoldenBounceStrategy:
                     "id": z.id, "price": z.price, "volume": z.peak_volume,
                     "timestamp": z.created_at.isoformat(), "state": z.status.value, "side": z.trade_side,
                     "min_price_after": z.extreme_price if z.side == "bid" else None,
-                    "max_price_after": z.extreme_price if z.side == "ask" else None
+                    "max_price_after": z.extreme_price if z.side == "ask" else None,
+                    "cumulative_delta": round(z.cumulative_delta, 2)
                 })
             with open(zones_file, "w", encoding="utf-8") as f: json.dump(zones_data, f, indent=2, ensure_ascii=False, default=str)
         except Exception as e: logger.error(f"Ошибка записи active_zones: {e}")
@@ -214,34 +215,28 @@ class GoldenBounceStrategy:
                 elif side == "Sell": signed_delta = -qty
                 else: continue
                 
-                # ✅ ИСПРАВЛЕНО: используем self.delta_buffer
                 self.delta_buffer.append((trade_ts, signed_delta))
                 
+                # ✅ НОВОЕ: Накапливаем кумулятивную дельту для ВСЕХ активных зон
                 for zone in self.active_zones:
-                    if zone.status in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING):
-                        zone.delta_pullback += signed_delta
+                    if zone.status != ZoneStatus.INVALIDATED:
+                        zone.update_cumulative_delta(signed_delta)
+                        if zone.status in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING):
+                            zone.delta_pullback += signed_delta
 
-            # Очистка старых данных
+            # Очистка старых данных из скользящего буфера
             self.delta_buffer = [(ts, d) for ts, d in self.delta_buffer if ts >= cutoff]
             
-            # Расчет метрик для активных зон
+            # Расчет метрик для активных зон (Z-скор остается для дополнительной фильтрации)
             for zone in self.active_zones:
                 if zone.status not in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING): continue
                 
                 net_60 = sum(d for _, d in self.delta_buffer)
                 gross_60 = sum(abs(d) for _, d in self.delta_buffer)
                 
-                zone.delta_recent = net_60
-                zone.delta_z_score = (net_60 / math.sqrt(gross_60)) if gross_60 > 0 else 0.0
-                
-                # 15s окно (короткий триггер)
                 net_15 = sum(d for ts, d in self.delta_buffer if ts >= cutoff_short)
-                zone.delta_short = net_15
                 
-                if zone.high_price is not None and zone.extreme_price is not None:
-                    price_range = abs(zone.high_price - zone.extreme_price)
-                    if price_range > 0 and zone.atr_at_creation > 0:
-                        zone.absorption_score = abs(zone.delta_pullback) / (price_range / zone.atr_at_creation)
+                zone.update_delta_metrics(net_60, net_15, gross_60)
                         
         except Exception as e: 
             logger.error(f"[{self.symbol}] Error in _on_trade_tape: {e}", exc_info=True)
@@ -293,9 +288,7 @@ class GoldenBounceStrategy:
                 await self._invalidate_zone(zone, "EXPIRED")
                 continue
 
-            if zone.status != ZoneStatus.INVALIDATED and (now - zone.created_at).total_seconds() > self.max_zone_age_sec:
-                await self._invalidate_zone(zone, "AGED_OUT")
-                continue
+            # ✅ УБРАНО: Проверка max_zone_age_sec. Зоны живут 48 часов.
 
             if zone.status == ZoneStatus.CONFIRMED:
                 if zone.check_departure(current_price, k_retracement):
@@ -305,18 +298,7 @@ class GoldenBounceStrategy:
                 if zone.is_return_expired(now):
                     await self._invalidate_zone(zone, "RETURN_TIMEOUT")
                 elif zone.check_return(current_price):
-                    # ✅ ИСПРАВЛЕНО: используем self.delta_buffer
-                    net_60 = sum(d for _, d in self.delta_buffer)
-                    gross_60 = sum(abs(d) for _, d in self.delta_buffer)
-                    zone.delta_recent = net_60
-                    zone.delta_z_score = (net_60 / math.sqrt(gross_60)) if gross_60 > 0 else 0.0
-                    
-                    if zone.high_price is not None and zone.extreme_price is not None:
-                        price_range = abs(zone.high_price - zone.extreme_price)
-                        if price_range > 0 and zone.atr_at_creation > 0:
-                            zone.absorption_score = abs(zone.delta_pullback) / (price_range / zone.atr_at_creation)
-                    
-                    logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | Delta: {zone.delta_recent:.2f} | Z: {zone.delta_z_score:.2f}")
+                    logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | CumDelta: {zone.cumulative_delta:.2f} | Z: {zone.delta_z_score:.2f}")
                     await self._evaluate_signal(zone, current_price)
                     zone.status = ZoneStatus.SIGNAL_READY
         
@@ -353,20 +335,24 @@ class GoldenBounceStrategy:
             await self._invalidate_zone(zone, "WALL_GONE" if wall_status == "GONE" else "WALL_CONSUMED")
             return
 
-        # === ПРОВЕРКА ДЕЛЬТЫ ЧЕРЕZ Z-SCORE ===
-        z_threshold = 2.0 * k_delta 
+        # === ПРОВЕРКА КУМУЛЯТИВНОЙ ДЕЛЬТЫ (ГЛАВНЫЙ ФИЛЬТР PF 7.06) ===
+        # Для LONG (bid стена): ждем ОТРИЦАТЕЛЬНУЮ дельту (цена падала, толпа продавала, стена поглотила)
+        # Для SHORT (ask стена): ждем ПОЛОЖИТЕЛЬНУЮ дельту (цена росла, толпа покупала, стена раздала)
+        delta_direction_ok = (zone.side == "bid" and zone.cumulative_delta < 0) or \
+                             (zone.side == "ask" and zone.cumulative_delta > 0)
         
-        is_significant_z = abs(zone.delta_z_score) >= z_threshold
-        is_short_impulse = abs(zone.delta_short) > (zone.atr_at_creation * 10)
-
-        if not (is_significant_z or is_short_impulse):
-            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} weak delta (Z: {zone.delta_z_score:.2f} < {z_threshold:.2f})")
-            return
-
-        delta_direction_ok = (zone.side == "bid" and zone.delta_recent > 0) or (zone.side == "ask" and zone.delta_recent < 0)
         if not delta_direction_ok:
-            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong delta direction")
+            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong cumulative delta direction (CumDelta: {zone.cumulative_delta:.2f})")
             return
+
+        # Дополнительная проверка силы через Z-скор (опционально, можно убрать если мешает)
+        z_threshold = 1.5 * k_delta 
+        is_significant_z = abs(zone.delta_z_score) >= z_threshold
+        
+        if not is_significant_z:
+            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} weak recent momentum (Z: {zone.delta_z_score:.2f} < {z_threshold:.2f})")
+            # Можно убрать этот return, если хочешь входить ТОЛЬКО по кумулятивной дельте
+            # return 
 
         sv = self.config.get("trading", {}).get("structure_validation", {})
         sl_buf = sv.get("sl_buffer_atr5m", 1.0) * multipliers.get("k_atr_sl_buffer", 1.0)
@@ -393,7 +379,7 @@ class GoldenBounceStrategy:
             from execution.passport import TradePassport, SignalSource
             
             risk_usd = self.config.get("trading", {}).get("risk", {}).get("base_risk_usdt", 30.0)
-            max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 10.0) # ✅ ИСПРАВЛЕНО на 10.0 по конфиг
+            max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 10.0)
             
             size = risk_usd / levels["risk"] if levels["risk"] > 0 else 0.0
             if size > max_size:
@@ -404,13 +390,13 @@ class GoldenBounceStrategy:
                 return
 
             # === POSITIVE EV FILTER ===
-            fee_rate = 0.0002  # ✅ Реальная комиссия Bybit для maker (лимитные ордера)
+            fee_rate = 0.0002  # Реальная комиссия Bybit для maker
             notional_entry = levels["entry"] * size
             notional_exit_tp1 = levels["tp1"] * (size * 0.5)
             est_commission = (notional_entry + notional_exit_tp1) * fee_rate
             
             gross_profit_tp1 = (size * 0.5) * abs(levels["tp1"] - levels["entry"])
-            required_profit = est_commission * 1.2  # ✅ СНИЖЕНО до 1.2 по договоренности
+            required_profit = est_commission * 1.2  
             
             if gross_profit_tp1 < required_profit:
                 logger.warning(f"🚫 [{self.symbol}] Positive EV Filter failed: GP=${gross_profit_tp1:.2f} < Req=${required_profit:.2f}")
@@ -451,7 +437,7 @@ class GoldenBounceStrategy:
             # === ШАГ 1: ENTRY OFFSET ===
             tick_size_map = {
                 "SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, 
-                "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01 # ✅ LINKUSDT исправлен на 0.001
+                "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01
             }
             tick_size = tick_size_map.get(self.symbol, 0.01)
             offset_ticks = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("entry_offset_ticks", 0)
@@ -477,7 +463,7 @@ class GoldenBounceStrategy:
                 "risk": levels["risk"], 
                 "size": size, 
                 "be_price": be_price,
-                "delta_z": zone.delta_z_score,
+                "cumulative_delta": zone.cumulative_delta,
                 "offset_ticks": offset_ticks
             })
 
