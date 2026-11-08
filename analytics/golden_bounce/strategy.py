@@ -41,7 +41,6 @@ class GoldenBounceStrategy:
             if isinstance(config, dict):
                 raw_config = config
             else:
-                # Пытаемся извлечь словарь из объекта Config
                 raw_config = getattr(config, 'data', None) or getattr(config, '_data', None) or {}
         self.config = raw_config
         # ================================================================
@@ -62,7 +61,8 @@ class GoldenBounceStrategy:
         self.active_zones: List[GBZone] = []
         self.atr_multiplier = self.config.get("trading", {}).get("structure_validation", {}).get("min_retracement_atr_multiplier", 1.5)
         
-        self.delta_buffers: Dict[str, List[tuple]] = {}
+        # ✅ ИСПРАВЛЕНО: Единый буфер для экземпляра (экземпляр привязан к одному символу)
+        self.delta_buffer: List[tuple] = []
         self.delta_window_sec = 60
         self.delta_short_window_sec = 15
 
@@ -209,12 +209,12 @@ class GoldenBounceStrategy:
                 trade_ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                 
                 side = t.get("S", "")
-                # Берем 'v', если нет - 'qty', если нет - 0.0
                 qty = float(t.get("v", 0) or t.get("qty", 0) or 0.0)
                 if side == "Buy": signed_delta = qty
                 elif side == "Sell": signed_delta = -qty
                 else: continue
                 
+                # ✅ ИСПРАВЛЕНО: используем self.delta_buffer
                 self.delta_buffer.append((trade_ts, signed_delta))
                 
                 for zone in self.active_zones:
@@ -228,7 +228,6 @@ class GoldenBounceStrategy:
             for zone in self.active_zones:
                 if zone.status not in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING): continue
                 
-                # 60s окно: gross_volume = sum(abs(delta)), что математически идентично sum(qty), но надежнее
                 net_60 = sum(d for _, d in self.delta_buffer)
                 gross_60 = sum(abs(d) for _, d in self.delta_buffer)
                 
@@ -306,7 +305,7 @@ class GoldenBounceStrategy:
                 if zone.is_return_expired(now):
                     await self._invalidate_zone(zone, "RETURN_TIMEOUT")
                 elif zone.check_return(current_price):
-                    # Обновляем метрики прямо перед проверкой сигнала
+                    # ✅ ИСПРАВЛЕНО: используем self.delta_buffer
                     net_60 = sum(d for _, d in self.delta_buffer)
                     gross_60 = sum(abs(d) for _, d in self.delta_buffer)
                     zone.delta_recent = net_60
@@ -394,7 +393,7 @@ class GoldenBounceStrategy:
             from execution.passport import TradePassport, SignalSource
             
             risk_usd = self.config.get("trading", {}).get("risk", {}).get("base_risk_usdt", 30.0)
-            max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 100.0)
+            max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 10.0) # ✅ ИСПРАВЛЕНО на 10.0 по конфиг
             
             size = risk_usd / levels["risk"] if levels["risk"] > 0 else 0.0
             if size > max_size:
@@ -405,7 +404,7 @@ class GoldenBounceStrategy:
                 return
 
             # === POSITIVE EV FILTER ===
-            fee_rate = 0.0002  # Реальная комиссия Bybit для maker (лимитные ордера)
+            fee_rate = 0.0002  # ✅ Реальная комиссия Bybit для maker (лимитные ордера)
             notional_entry = levels["entry"] * size
             notional_exit_tp1 = levels["tp1"] * (size * 0.5)
             est_commission = (notional_entry + notional_exit_tp1) * fee_rate
@@ -452,7 +451,7 @@ class GoldenBounceStrategy:
             # === ШАГ 1: ENTRY OFFSET ===
             tick_size_map = {
                 "SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, 
-                "LINKUSDT": 0.01, "BNBUSDT": 0.1, "AVAXUSDT": 0.01
+                "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01 # ✅ LINKUSDT исправлен на 0.001
             }
             tick_size = tick_size_map.get(self.symbol, 0.01)
             offset_ticks = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("entry_offset_ticks", 0)
