@@ -25,7 +25,7 @@ class GoldenBounceStrategy:
         passport_storage=None,
         position_monitor=None,
         market_buffer=None,
-        config: Optional[Dict | Config] = None,
+        config=None,
         symbol: str = "SOLUSDT"
     ):
         self.bus = event_bus
@@ -35,13 +35,16 @@ class GoldenBounceStrategy:
         self.market_buffer = market_buffer
         self.symbol = symbol
 
+        # === ИСПРАВЛЕНИЕ: Корректное чтение конфига из объекта Config ===
         raw_config = {}
         if config is not None:
             if isinstance(config, dict):
                 raw_config = config
             else:
-                raw_config = getattr(config, 'data', {}) or getattr(config, '_data', {}) or {}
+                # Пытаемся извлечь словарь из объекта Config
+                raw_config = getattr(config, 'data', None) or getattr(config, '_data', None) or {}
         self.config = raw_config
+        # ================================================================
 
         gb_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("wall_persistence", {})
         if not gb_cfg:
@@ -59,13 +62,10 @@ class GoldenBounceStrategy:
         self.active_zones: List[GBZone] = []
         self.atr_multiplier = self.config.get("trading", {}).get("structure_validation", {}).get("min_retracement_atr_multiplier", 1.5)
         
-        # Буфер дельты для ТЕКУЩЕГО символа: (timestamp, signed_delta)
-        # gross_volume теперь вычисляется как sum(abs(signed_delta)), что надежнее
-        self.delta_buffer: List[tuple] = [] 
+        self.delta_buffers: Dict[str, List[tuple]] = {}
         self.delta_window_sec = 60
         self.delta_short_window_sec = 15
 
-        # === ВОЛНА 1: защита от карусели и метрики здоровья ===
         health = (self.config.get("trading", {}).get("strategies", {})
                   .get("golden_bounce", {}).get("health", {}))
         self.min_atr_bps = float(health.get("min_atr_bps", 20))
@@ -79,7 +79,6 @@ class GoldenBounceStrategy:
         self.max_zones_per_hour = int(health.get("max_zones_per_hour", 60))
         self.entry_order_ttl_sec = float(health.get("entry_order_ttl_sec", 600))
         
-        # === REGIME SHIFT ===
         regime_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("regime_shift", {})
         self.min_atr_ratio = float(regime_cfg.get("min_atr_ratio", 0.5))
         self.max_atr_ratio = float(regime_cfg.get("max_atr_ratio", 2.0))
