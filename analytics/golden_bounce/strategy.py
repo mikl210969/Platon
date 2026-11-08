@@ -1,6 +1,6 @@
 """
 Golden Bounce Strategy. 
-Версия: Сессионные множители, REGIME_SHIFT, Z-скор дельты, адаптивный BE.
+Версия: Сессионные множители, REGIME_SHIFT, Z-скор дельты (исправленный), адаптивный BE.
 """
 
 import logging
@@ -9,6 +9,7 @@ import math
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
+from core.config import Config
 from core.event_bus import EventBus
 from analytics.golden_bounce.wall_tracker import WallPersistenceTracker
 from analytics.golden_bounce.zone import GBZone, ZoneStatus
@@ -24,7 +25,7 @@ class GoldenBounceStrategy:
         passport_storage=None,
         position_monitor=None,
         market_buffer=None,
-        config: Optional[Dict] = None,
+        config: Optional[Dict | Config] = None,
         symbol: str = "SOLUSDT"
     ):
         self.bus = event_bus
@@ -58,10 +59,11 @@ class GoldenBounceStrategy:
         self.active_zones: List[GBZone] = []
         self.atr_multiplier = self.config.get("trading", {}).get("structure_validation", {}).get("min_retracement_atr_multiplier", 1.5)
         
-        # Буферы дельты: (timestamp, signed_delta, gross_volume)
+        # Буфер дельты для ТЕКУЩЕГО символа: (timestamp, signed_delta)
+        # gross_volume теперь вычисляется как sum(abs(signed_delta)), что надежнее
         self.delta_buffer: List[tuple] = [] 
         self.delta_window_sec = 60
-        self.delta_short_window_sec = 15  # Короткое окно для ранних триггеров
+        self.delta_short_window_sec = 15
 
         # === ВОЛНА 1: защита от карусели и метрики здоровья ===
         health = (self.config.get("trading", {}).get("strategies", {})
@@ -189,7 +191,7 @@ class GoldenBounceStrategy:
             for z in self.active_zones:
                 zones_data.append({
                     "id": z.id, "price": z.price, "volume": z.peak_volume,
-                    "timestamp": z.created_at.isoformat(), "state": z.status, "side": z.trade_side,
+                    "timestamp": z.created_at.isoformat(), "state": z.status.value, "side": z.trade_side,
                     "min_price_after": z.extreme_price if z.side == "bid" else None,
                     "max_price_after": z.extreme_price if z.side == "ask" else None
                 })
@@ -200,6 +202,7 @@ class GoldenBounceStrategy:
         try:
             now = datetime.now(timezone.utc)
             cutoff = now - timedelta(seconds=self.delta_window_sec)
+            cutoff_short = now - timedelta(seconds=self.delta_short_window_sec)
             
             for t in trades:
                 ts_ms = t.get("T", 0)
@@ -207,41 +210,43 @@ class GoldenBounceStrategy:
                 trade_ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                 
                 side = t.get("S", "")
-                qty = float(t.get("v", 0))
+                # Берем 'v', если нет - 'qty', если нет - 0.0
+                qty = float(t.get("v", 0) or t.get("qty", 0) or 0.0)
                 if side == "Buy": signed_delta = qty
                 elif side == "Sell": signed_delta = -qty
                 else: continue
                 
-                # (timestamp, signed_delta, gross_volume)
-                self.delta_buffer.append((trade_ts, signed_delta, qty))
+                self.delta_buffer.append((trade_ts, signed_delta))
                 
                 for zone in self.active_zones:
                     if zone.status in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING):
                         zone.delta_pullback += signed_delta
 
-            self.delta_buffer = [(ts, d, v) for ts, d, v in self.delta_buffer if ts >= cutoff]
+            # Очистка старых данных
+            self.delta_buffer = [(ts, d) for ts, d in self.delta_buffer if ts >= cutoff]
             
-            # Расчет метрик для зон
+            # Расчет метрик для активных зон
             for zone in self.active_zones:
                 if zone.status not in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING): continue
                 
-                # 60s окно
-                net_60 = sum(d for _, d, _ in self.delta_buffer)
-                gross_60 = sum(v for _, _, v in self.delta_buffer)
+                # 60s окно: gross_volume = sum(abs(delta)), что математически идентично sum(qty), но надежнее
+                net_60 = sum(d for _, d in self.delta_buffer)
+                gross_60 = sum(abs(d) for _, d in self.delta_buffer)
+                
                 zone.delta_recent = net_60
                 zone.delta_z_score = (net_60 / math.sqrt(gross_60)) if gross_60 > 0 else 0.0
                 
                 # 15s окно (короткий триггер)
-                cutoff_short = now - timedelta(seconds=self.delta_short_window_sec)
-                net_15 = sum(d for ts, d, v in self.delta_buffer if ts >= cutoff_short)
-                gross_15 = sum(v for ts, d, v in self.delta_buffer if ts >= cutoff_short) # ✅ ИСПРАВЛЕНО
+                net_15 = sum(d for ts, d in self.delta_buffer if ts >= cutoff_short)
                 zone.delta_short = net_15
                 
                 if zone.high_price is not None and zone.extreme_price is not None:
                     price_range = abs(zone.high_price - zone.extreme_price)
                     if price_range > 0 and zone.atr_at_creation > 0:
                         zone.absorption_score = abs(zone.delta_pullback) / (price_range / zone.atr_at_creation)
-        except Exception as e: logger.error(f"[{self.symbol}] Error in _on_trade_tape: {e}", exc_info=True)
+                        
+        except Exception as e: 
+            logger.error(f"[{self.symbol}] Error in _on_trade_tape: {e}", exc_info=True)
 
     async def _on_orderbook(self, snapshot: Dict[str, Any]):
         try:
@@ -295,17 +300,19 @@ class GoldenBounceStrategy:
                 continue
 
             if zone.status == ZoneStatus.CONFIRMED:
-                # Динамический порог отката
-                departure_threshold = zone.atr_at_creation * k_retracement
-                if zone.check_departure(current_price, k_retracement): # Используем k_retracement как множитель
+                if zone.check_departure(current_price, k_retracement):
                     logger.info(f"📉 [{self.symbol}] ZONE DEPARTED: {zone.id} ({zone.trade_side}) @ {zone.price} | Extreme: {zone.extreme_price}")
 
             elif zone.status == ZoneStatus.DEPARTED:
                 if zone.is_return_expired(now):
                     await self._invalidate_zone(zone, "RETURN_TIMEOUT")
                 elif zone.check_return(current_price):
-                    zone.delta_recent = sum(d for _, d, _ in self.delta_buffer)
-                    # Пересчет absorption_score с новыми метриками
+                    # Обновляем метрики прямо перед проверкой сигнала
+                    net_60 = sum(d for _, d in self.delta_buffer)
+                    gross_60 = sum(abs(d) for _, d in self.delta_buffer)
+                    zone.delta_recent = net_60
+                    zone.delta_z_score = (net_60 / math.sqrt(gross_60)) if gross_60 > 0 else 0.0
+                    
                     if zone.high_price is not None and zone.extreme_price is not None:
                         price_range = abs(zone.high_price - zone.extreme_price)
                         if price_range > 0 and zone.atr_at_creation > 0:
@@ -349,20 +356,15 @@ class GoldenBounceStrategy:
             return
 
         # === ПРОВЕРКА ДЕЛЬТЫ ЧЕРЕZ Z-SCORE ===
-        # Базовый порог z-скора ~2.0 (статистическая значимость), умноженный на сессионный k_delta
         z_threshold = 2.0 * k_delta 
         
-        # Условие: либо высокий z-скор (60s), либо сильный импульс в коротком окне (15s)
         is_significant_z = abs(zone.delta_z_score) >= z_threshold
-        is_short_impulse = abs(zone.delta_short) > (zone.atr_at_creation * 10) # Эвристика для короткого окна
+        is_short_impulse = abs(zone.delta_short) > (zone.atr_at_creation * 10)
 
         if not (is_significant_z or is_short_impulse):
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} weak delta (Z: {zone.delta_z_score:.2f} < {z_threshold:.2f})")
             return
 
-        # Направление дельты должно совпадать с ожидаемым отскоком
-        # Для LONG (bid): ожидаем покупку (положительная дельта)
-        # Для SHORT (ask): ожидаем продажу (отрицательная дельта)
         delta_direction_ok = (zone.side == "bid" and zone.delta_recent > 0) or (zone.side == "ask" and zone.delta_recent < 0)
         if not delta_direction_ok:
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong delta direction")
@@ -389,11 +391,9 @@ class GoldenBounceStrategy:
     def _get_wall_status(self, zone: GBZone) -> str: return zone.wall_status
 
     async def _create_passport(self, zone: GBZone, levels: dict, is_exhaustion: bool):
-        """Создать TradePassport (IDLE) и передать в OrderManager."""
         try:
             from execution.passport import TradePassport, SignalSource
             
-            # 1. Расчет размера позиции с защитой от гиганских лотов
             risk_usd = self.config.get("trading", {}).get("risk", {}).get("base_risk_usdt", 30.0)
             max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 100.0)
             
@@ -412,7 +412,7 @@ class GoldenBounceStrategy:
             est_commission = (notional_entry + notional_exit_tp1) * fee_rate
             
             gross_profit_tp1 = (size * 0.5) * abs(levels["tp1"] - levels["entry"])
-            required_profit = est_commission * 1.5
+            required_profit = est_commission * 1.2  # ✅ СНИЖЕНО до 1.2 по договоренности
             
             if gross_profit_tp1 < required_profit:
                 logger.warning(f"🚫 [{self.symbol}] Positive EV Filter failed: GP=${gross_profit_tp1:.2f} < Req=${required_profit:.2f}")
@@ -426,14 +426,13 @@ class GoldenBounceStrategy:
 
             # === АДАПТИВНЫЙ BE ===
             actual_risk_usdt = abs(levels["entry"] - levels["sl"]) * size
-            target_profit_usdt = est_commission + (actual_risk_usdt * 0.03) # Комиссия + 3% риска
+            target_profit_usdt = est_commission + (actual_risk_usdt * 0.03)
             
             price_offset = target_profit_usdt / size
             be_price = levels["entry"] + price_offset if zone.trade_side == "LONG" else levels["entry"] - price_offset
 
             logger.info(f"🛡️ [{self.symbol}] BE: {be_price:.4f} (Comm: ${est_commission:.2f} + Profit: ${actual_risk_usdt * 0.03:.2f})")
 
-            # 2. Создаем объект TradePassport со статусом IDLE
             passport = TradePassport(
                 signal_id=zone.id, 
                 strategy="GoldenBounce", 
@@ -451,7 +450,7 @@ class GoldenBounceStrategy:
                 status="IDLE"
             )
 
-            # === ШАГ 1: ENTRY OFFSET (Сдвиг входа для улучшения fill rate) ===
+            # === ШАГ 1: ENTRY OFFSET ===
             tick_size_map = {
                 "SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, 
                 "LINKUSDT": 0.01, "BNBUSDT": 0.1, "AVAXUSDT": 0.01
@@ -463,16 +462,11 @@ class GoldenBounceStrategy:
             if offset_ticks > 0:
                 if zone.trade_side == "LONG":
                     limit_price += (offset_ticks * tick_size)
-                else:  # SHORT
+                else:
                     limit_price -= (offset_ticks * tick_size)
                 logger.info(f"📏 [{self.symbol}] Entry offset: {offset_ticks} ticks. Limit: {limit_price:.4f} (Wall: {levels['entry']:.4f})")
 
-            logger.info(
-                f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | "
-                f"{zone.trade_side} @ {levels['entry']:.2f} | "
-                f"SL: {levels['sl']:.2f} (Risk: {levels['risk']:.3f}) | "
-                f"TP1: {levels['tp1']:.2f} | Size: {size:.2f}"
-            )
+            logger.info(f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {levels['entry']:.2f} | SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f}")
 
             self._log_autopsy("SIGNAL_GENERATED", {
                 "zone_id": zone.id, 
@@ -489,16 +483,14 @@ class GoldenBounceStrategy:
                 "offset_ticks": offset_ticks
             })
 
-            # РЕГИСТРАЦИЯ ПАСПОРТА: PositionMonitor узнает о сделке
             await self.bus.publish("EXEC:NEW_TRADE", passport)
             logger.info(f"📋 [{self.symbol}] Passport registered in PositionMonitor (EXEC:NEW_TRADE)")
 
-            # 3. Передаем в OrderManager с перехватом всех ошибок
             if self.om:
                 try:
                     await self.om.place_entry_order(
                         passport, 
-                        limit_price=str(limit_price), # <-- Используем скорректированную цену
+                        limit_price=str(limit_price),
                         timeout_seconds=int(self.entry_order_ttl_sec), 
                         zone_id=zone.id
                     )
@@ -532,17 +524,12 @@ class GoldenBounceStrategy:
                 self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "dead_market"})
                 return
 
-            # Динамический радиус дедупа
             radius = max(self.zone_dedup_min_pct * price_f, self.zone_dedup_atr_mult * atr)
             near = self._find_near_zone(price_f, radius)
             if near is not None:
                 near.peak_volume = max(near.peak_volume, float(event.get("peak_volume", 0)))
                 self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "dedup"})
                 return
-
-            # Проверка силы стены через сессионный множитель
-            # (Предполагается, что min_wall_value_usd уже отфильтровал абсолютный минимум,
-            # здесь можно добавить проверку относительно медианы, если она есть в snapshot)
             
             zone = GBZone(symbol=symbol, price=price_f, side=str(side), created_at=now, atr_at_creation=atr, peak_volume=event.get("peak_volume", 0), score_multiplier=1.0)
             zone.departure_threshold = zone.calculate_departure_threshold(self.atr_multiplier)
