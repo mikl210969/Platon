@@ -17,19 +17,20 @@ trading:
   structure_validation:
     wall_volume_multiple: 1.5
     wall_baseline_bars: 28
-    min_retracement_atr_multiplier: 1.5  # ✅ Глубина "Испуга" (1.5x ATR)
+    min_retracement_atr_multiplier: 1.5  # ✅ Используется как порог отката
     departure_max_bars: 24
     return_max_bars: 24
-    sl_buffer_atr5m: 1.0
-    tp1_risk_multiple: 1.5
-    tp2_risk_multiple: 3.0
+    # sl_buffer_atr5m: 1.0  # ❌ Не используется (SL от extreme_price)
+    # tp1_risk_multiple: 1.5  # ❌ Не используется (TP1 = 50% departure)
+    # tp2_risk_multiple: 3.0  # ❌ Не используется (TP2 = 100% departure)
     post_tp1_logic: "tp2_protect"
     tp2_protection_buffer_mult: 3.0
-    commission_rate: 0.0004
+    # commission_rate: 0.0004  # ❌ Не используется (в коде fee_rate = 0.0004)
   
   risk:
     base_risk_usdt: 30.0
-    max_position_size: 10.0  # ✅ Лимит риска ~$18-20 на сделку
+    max_position_size: 10.0
+    min_position_size: 0.1  # ✅ ДОБАВЛЕНО
     max_daily_loss: 100.0
   
   orders:
