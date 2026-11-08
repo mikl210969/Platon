@@ -7,9 +7,10 @@ bybit:
 trading:
   filters:
     positive_ev:
-      safety_margin: 1.5
-  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT"]
+      safety_margin: 1.2  # ✅ СНИЖЕНО с 1.5 до 1.2 (Вариант Б)
+  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT", "BTCUSDT", "BNBUSDT", "AVAXUSDT"]  # ✅ ДОБАВЛЕНЫ 3 символа
   category: "linear"
+  
   exit_logic: "structure"
   
   structure_validation:
@@ -37,35 +38,32 @@ trading:
 
   strategies:
     golden_bounce:
-      # === СЕССИОННЫЕ МНОЖИТЕЛИ (UTC) ===
       session_multipliers:
-        asian_night:   # 00:00 - 06:00
+        asian_night:
           k_wall: 2.5
           k_atr_sl_buffer: 1.0
           k_atr_retracement: 1.2
           k_delta: 0.8
-        asian:         # 06:00 - 12:00
+        asian:
           k_wall: 2.0
           k_atr_sl_buffer: 1.0
           k_atr_retracement: 1.5
           k_delta: 1.0
-        european:      # 12:00 - 20:00
+        european:
           k_wall: 1.8
           k_atr_sl_buffer: 1.2
           k_atr_retracement: 1.5
           k_delta: 1.2
-        american:      # 20:00 - 00:00
+        american:
           k_wall: 1.5
           k_atr_sl_buffer: 1.5
           k_atr_retracement: 1.5
           k_delta: 1.5
 
-      # === REGIME SHIFT ===
       regime_shift:
         min_atr_ratio: 0.5
         max_atr_ratio: 2.0
 
-      # === HEALTH & GUARDS ===
       health:
         min_atr_bps: 20
         dead_market_hysteresis_sec: 600
@@ -78,7 +76,6 @@ trading:
         max_zones_per_hour: 60
         entry_order_ttl_sec: 600
 
-      # === WALL PERSISTENCE ===
       wall_persistence:
         min_consecutive_ticks: 2
         detect_window_sec: 1.0
@@ -96,27 +93,31 @@ trading:
         pull_cycle_demerit: 0.5
         max_pull_cycles: 3
 
-      # === ENTRY OFFSET (НОВОЕ: Шаг 1 для улучшения fill rate) ===
       entry_offset_ticks: 2
 
-# ✅ СПЕЦИФИЧЕСКИЕ ПАРАМЕТРЫ ПО ИНСТРУМЕНТАМ
 instruments:
   SOLUSDT:
     enabled: true
     min_wall_value_usd: 50000
+    
   LINKUSDT:
     enabled: true
     min_wall_value_usd: 80000
+    
   ETHUSDT:
     enabled: true
     min_wall_value_usd: 120000
+    
   BTCUSDT:
-    enabled: false
+    enabled: true
+    min_wall_value_usd: 300000
+    
   BNBUSDT:
-    enabled: false
-    min_wall_value_usd: 120000
+    enabled: true
+    min_wall_value_usd: 60000
+    
   AVAXUSDT:
-    enabled: false
+    enabled: true
     min_wall_value_usd: 60000
 
 self_test:
