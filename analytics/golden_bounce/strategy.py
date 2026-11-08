@@ -406,7 +406,7 @@ class GoldenBounceStrategy:
                 return
 
             # === POSITIVE EV FILTER ===
-            fee_rate = 0.00055
+            fee_rate = 0.0002  # Реальная комиссия Bybit для maker (лимитные ордера)
             notional_entry = levels["entry"] * size
             notional_exit_tp1 = levels["tp1"] * (size * 0.5)
             est_commission = (notional_entry + notional_exit_tp1) * fee_rate
