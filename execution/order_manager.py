@@ -152,7 +152,7 @@ class OrderManager:
             has_position = await self.has_open_position(passport.symbol)
             if has_position:
                 passport.add_event("ERROR: POSITION_EXISTS", f"Уже есть открытая позиция по {passport.symbol}")
-                logger.warning(f"️ [{passport.passport_id}] Пропуск: уже есть открытая позиция по {passport.symbol}")
+                logger.warning(f"⚠️ [{passport.passport_id}] Пропуск: уже есть открытая позиция по {passport.symbol}")
                 return False
 
             safe_qty = self._round_down_qty(float(passport.position_size), passport.symbol)
@@ -169,8 +169,26 @@ class OrderManager:
                 "sl_distance": abs(passport.entry_price - passport.sl_price) / passport.entry_price * 100
             })
 
-            passport.add_event("ACTION: PLACE_ENTRY", f"Размещение {passport.side} {safe_qty} @ {limit_price}")
-            logger.info(f"[{passport.passport_id}] Размещение входа: {passport.side} {safe_qty} @ {limit_price}")
+            # ==========================================================
+            # 🚀 НОВОЕ: АГРЕССИВНОЕ ИСПОЛНЕНИЕ (TAKER с защитой от проскальзывания)
+            # ==========================================================
+            # Чтобы гарантировать полное исполнение (избежать partial fills), 
+            # мы выставляем лимитный ордер с ценой, которая "перепрыгивает" спред.
+            # Для LONG: цена на 0.05% выше лимита (гарантирует покупку по Ask)
+            # Для SHORT: цена на 0.05% ниже лимита (гарантирует продажу по Bid)
+            # Это обеспечивает мгновенное исполнение (Taker), но ограничивает 
+            # максимальное проскальзывание значением 0.05%.
+            slippage_tolerance = 0.0005  # 0.05%
+            price_float = float(limit_price)
+            
+            if passport.side == "LONG":
+                aggressive_price = str(price_float * (1 + slippage_tolerance))
+            else:
+                aggressive_price = str(price_float * (1 - slippage_tolerance))
+            
+            passport.add_event("ACTION: PLACE_ENTRY", f"Агрессивный вход {passport.side} {safe_qty} @ лимит {limit_price} (исполнение до {aggressive_price})")
+            logger.info(f"[{passport.passport_id}] Размещение агрессивного входа: {passport.side} {safe_qty} @ лимит {limit_price} (агр. цена: {aggressive_price})")
+            # ==========================================================
 
             extra_params = {}
             if order_link_id:
@@ -181,14 +199,15 @@ class OrderManager:
                 symbol=passport.symbol,
                 side="Buy" if passport.side == "LONG" else "Sell",
                 qty=self._format_qty(safe_qty, passport.symbol),
-                price=limit_price,
-                order_type="Limit",
+                price=aggressive_price,  # ✅ ИСПОЛЬЗУЕМ АГРЕССИВНУЮ ЦЕНУ
+                order_type="Limit",      # ✅ ОСТАЕМ LIMIT ДЛЯ ЗАЩИТЫ ОТ БЕЗУМНОГО ПРОСКАЛЬЗЫВАНИЯ
                 time_in_force="GTC",
                 extra_params=extra_params,
             )
 
             order_id = result.get("orderId")
             if order_id:
+                # В паспорт записываем оригинальную целевую цену, но факт исполнения проверит UDS
                 passport.add_order_record(order_id, "LIMIT_ENTRY", "New", float(limit_price),
                                           safe_qty, client_order_id=order_link_id)
                 passport.add_event("SUCCESS: ORDER_PLACED", f"Биржа приняла ордер {order_id}")
@@ -200,11 +219,10 @@ class OrderManager:
                     timeout_seconds=timeout_seconds,
                     planned_qty=safe_qty,
                     zone_id=zone_id,
-                    fallback_to_market=False
+                    fallback_to_market=False # Теперь не нужно, т.к. вход уже агрессивный
                 )
 
                 logger.info(f"✅ [{passport.passport_id}] Вход размещен. Order ID: {order_id}, TTL: {timeout_seconds}s")
-                # Сохраняем паспорт сразу после размещения ордера (без задержки)
                 self._save_passport_json(passport)
                 return True
             else:
