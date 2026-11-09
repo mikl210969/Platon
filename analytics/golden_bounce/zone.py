@@ -3,7 +3,7 @@ GB Zone — торговая зона стратегии Golden Bounce.
 Логика: ОТСКАК от стены (не пробой). Версия: Кумулятивная дельта + 48ч TTL.
 """
 
-import math  # ✅ ДОБАВЛЕНО
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,7 +30,6 @@ class GBZone:
     id: str = field(default_factory=lambda: f"GB_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}_{uuid.uuid4().hex[:6]}")
     status: ZoneStatus = ZoneStatus.CONFIRMED
 
-    # Данные стены
     peak_volume: float = 0.0
     score_multiplier: float = 1.0
     fill_refills: int = 0
@@ -38,26 +37,22 @@ class GBZone:
     wall_status: str = "CONFIRMED"
     invalidation_reason: Optional[str] = None
 
-    # Отслеживание отката
     departure_threshold: float = 0.0
     extreme_price: Optional[float] = None
     high_price: Optional[float] = None
     departure_confirmed_at: Optional[datetime] = None
     
-    # Метрики дельты и абсорбции
     delta_recent: float = 0.0
     delta_pullback: float = 0.0
     delta_z_score: float = 0.0
     delta_short: float = 0.0
     absorption_score: float = 0.0
-    cumulative_delta: float = 0.0  # ✅ НОВОЕ: Кумулятивная дельта за весь цикл
+    cumulative_delta: float = 0.0
  
-    # Таймауты
-    ttl_seconds: float = 172800.0  # ✅ ИЗМЕНЕНО: 48 часов вместо 2
+    ttl_seconds: float = 172800.0
     return_ttl_seconds: float = 3600.0
 
-    # Гистерезис
-    return_window_pct: float = 0.005  # ✅ ИЗМЕНЕНО: ±0.5% коридор входа
+    return_window_pct: float = 0.005
     _last_return_check: Optional[datetime] = None
 
     @property
@@ -65,21 +60,17 @@ class GBZone:
         return "LONG" if self.side == "bid" else "SHORT"
 
     def calculate_departure_threshold(self, atr_multiplier: float = 1.5) -> float:
-        """Рассчитать порог отката: zone_price ± atr_multiplier × ATR."""
         distance = atr_multiplier * self.atr_at_creation
-        max_distance_pct = self.price * 0.04  # ✅ НОВОЕ: Не более 4% от цены
-        
+        max_distance_pct = self.price * 0.04
         actual_distance = min(distance, max_distance_pct)
 
-        if self.side == "bid":  # LONG: откат ВНИЗ от стены поддержки
+        if self.side == "bid":
             return self.price - actual_distance
-        else:  # SHORT: откат ВВЕРХ от стены сопротивления
+        else:
             return self.price + actual_distance
 
     def check_departure(self, current_price: float, atr_multiplier: float = 1.5) -> bool:
-        """Проверяет откат. ВАЖНО: позволяет extreme_price обновляться до реального дна/вершины."""
         if self.status != ZoneStatus.CONFIRMED:
-            # Если уже в откате, продолжаем обновлять экстремум
             if self.status == ZoneStatus.DEPARTED and self.extreme_price is not None:
                 if self.side == "bid" and current_price < self.extreme_price:
                     self.extreme_price = current_price
@@ -103,17 +94,15 @@ class GBZone:
             self.departure_threshold = threshold
             self.status = ZoneStatus.DEPARTED
             self.departure_confirmed_at = datetime.now(timezone.utc)
-            self.high_price = self.price  # Точка начала отката
-            self.extreme_price = current_price # Инициализируем экстремум
+            self.high_price = self.price
+            self.extreme_price = current_price
 
         return passed
 
     def update_cumulative_delta(self, signed_delta: float):
-        """✅ НОВОЕ: Накопление кумулятивной дельты с момента создания зоны."""
         self.cumulative_delta += signed_delta
 
     def update_delta_metrics(self, delta_recent: float, delta_short: float, gross_60: float):
-        """Обновить метрики дельты и рассчитать Z-скор."""
         self.delta_recent = delta_recent
         self.delta_short = delta_short
         self.delta_z_score = (delta_recent / math.sqrt(gross_60)) if gross_60 > 0 else 0.0
@@ -125,7 +114,6 @@ class GBZone:
                 self.absorption_score = abs(self.delta_pullback) / normalized_range
 
     def check_return(self, current_price: float) -> bool:
-        """Проверяет возврат в коридор ±0.5% от стены."""
         if self.status != ZoneStatus.DEPARTED or self.extreme_price is None:
             return False
 
@@ -134,13 +122,13 @@ class GBZone:
             return False
         self._last_return_check = now
 
-        return_window = self.price * self.return_window_pct # 0.005
+        return_window = self.price * self.return_window_pct
 
-        if self.side == "bid":  # LONG: цена возвращается ВВЕРХ к стене
+        if self.side == "bid":
             if current_price >= (self.price - return_window):
                 self.status = ZoneStatus.RETURNING
                 return True
-        else:  # SHORT: цена возвращается ВНИЗ к стене
+        else:
             if current_price <= (self.price + return_window):
                 self.status = ZoneStatus.RETURNING
                 return True
@@ -158,37 +146,30 @@ class GBZone:
         return (now - self.departure_confirmed_at).total_seconds() > self.return_ttl_seconds
 
     def calculate_sl_tp(self, current_entry_price: float) -> Optional[dict]:
-        """
-        ✅ ИСПРАВЛЕНО: Расчет на основе РЕАЛЬНОЙ департуры (Structure Mode), как в бэктесте PF 7.06.
-        """
         if self.extreme_price is None or self.price is None:
             return None
 
-        # Расстояние, которое цена прошла от стены до экстремума (и которое должна пройти обратно)
         departure_abs = abs(self.price - self.extreme_price)
-        
-        # Буфер 0.2% от цены экстремума (как в бэктесте)
         buffer = self.extreme_price * 0.002 
 
-        if self.side == "bid":  # LONG
+        if self.side == "bid":
             sl = self.extreme_price - buffer
             tp1 = current_entry_price + (departure_abs * 0.5)
             tp2 = current_entry_price + departure_abs
-        else:  # SHORT
+        else:
             sl = self.extreme_price + buffer
             tp1 = current_entry_price - (departure_abs * 0.5)
             tp2 = current_entry_price - departure_abs
 
-        # ✅ ИСПРАВЛЕНО: Риск считается как реальное расстояние до SL в долларах за 1 единицу
         risk_per_unit = abs(current_entry_price - sl)
 
         return {
-            "entry": current_entry_price,      # ✅ Вход по цене возврата, а не стены!
+            "entry": current_entry_price,
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
-            "risk_per_unit": risk_per_unit,    # ✅ Для корректного динамического сайзинга
-            "departure_abs": departure_abs     # Для логирования и отладки
+            "risk_per_unit": risk_per_unit,
+            "departure_abs": departure_abs
         }
 
     def to_dict(self) -> dict:
