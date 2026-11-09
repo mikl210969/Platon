@@ -27,6 +27,9 @@ class PositionMonitor:
         self.bus.subscribe("EXEC:NEW_TRADE", self._on_new_trade)
         self.bus.subscribe("ORDER:TIMER_CANCELLED", self._on_timer_cancelled)
         self.bus.subscribe("UDS:POSITION_UPDATE", self._on_position_update)
+        
+        # ✅ ПУТЬ Б: Подписка на отклонение ордера Order Manager-ом (страховочная сетка)
+        self.bus.subscribe("EXEC:ORDER_REJECTED", self._on_order_rejected_event)
 
     def _get_manager(self, passport: TradePassport) -> PassportManager:
         if passport.passport_id not in self.managers:
@@ -49,11 +52,33 @@ class PositionMonitor:
         self._get_manager(passport)
         logger.info(f"📋 [{passport.passport_id}] Паспорт добавлен в мониторинг")
 
+    # ✅ ПУТЬ А: Метод для стратегии, чтобы проверить наличие позиции ДО создания паспорта
+    def has_active_position(self, symbol: str) -> bool:
+        """Возвращает True, если по символу уже есть активный (незакрытый) паспорт."""
+        for p in self.active_passports.values():
+            if p.symbol == symbol:
+                status = self._get_manager(p).current_state()
+                if status not in ("CLOSED", "ORDER_CANCELLED", "ORDER_REJECTED"):
+                    return True
+        return False
+
+    # ✅ ПУТЬ Б: Обработчик события отклонения от Order Manager
+    async def _on_order_rejected_event(self, data: dict):
+        passport_id = data.get("passport_id")
+        reason = data.get("reason", "UNKNOWN")
+        
+        # ✅ ПРОВЕРКА: если passport_id отсутствует, логируем и выходим
+        if not passport_id:
+            logger.warning(f"🛑 ORDER_REJECTED: получено событие без passport_id. Reason: {reason}")
+            return
+            
+        await self._handle_order_rejected(passport_id, reason)
+
     async def _handle_order_rejected(self, passport_id: str, reason: str):
         """
         Обрабатывает отклонение ордера (например, POSITION_EXISTS или Qty invalid).
         Переводит паспорт в ORDER_REJECTED и гарантированно удаляет его из активных словарей,
-        предотвращая появление "зомби-паспортов".
+        предотвращая появление "зомби-паспортов" и ERROR_STATE.
         """
         passport = self.active_passports.get(passport_id)
         if not passport:
@@ -66,7 +91,7 @@ class PositionMonitor:
         # 2. Сохраняем финальное состояние
         self.storage.save(passport)
         
-        # 3. ✅ КРИТИЧЕСКАЯ ОЧИСТКА: удаляем зомби из словарей мониторинга
+        # 3. КРИТИЧЕСКАЯ ОЧИСТКА: удаляем зомби из словарей мониторинга
         self.active_passports.pop(passport_id, None)
         self.managers.pop(passport_id, None)
         
@@ -138,7 +163,7 @@ class PositionMonitor:
                                source="TIMER")
             self._safe_transition(passport, "PARTIAL_FILL",
                                   reason=f"filled={filled_qty}, cancelled={cancelled_qty}", source="TIMER")
-            logger.info(f"️ [{passport.passport_id}] Частичное исполнение: {filled_qty} {passport.symbol}")
+            logger.info(f"⚠️ [{passport.passport_id}] Частичное исполнение: {filled_qty} {passport.symbol}")
             await self.om.place_protective_orders(passport)
         else:
             passport.add_event("TIMER: CANCELLED",
@@ -158,7 +183,6 @@ class PositionMonitor:
             symbol = pos_info.get("symbol")
             size = float(pos_info.get("size", 0))
 
-            # ✅ ИСПРАВЛЕНО: Убран хардкод SOLUSDT. Теперь работает для всех символов.
             if not symbol:
                 continue
 
@@ -174,7 +198,7 @@ class PositionMonitor:
                         continue
                     
                     if current_state in ("POSITION_OPEN", "TP1_PARTIAL_CLOSE"):
-                        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Ставим флаг ДО закрытия
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Ставим флаг ДО закрытия
                         passport.is_closing = True
                         passport.closing_source = "UDS"
                         
@@ -194,7 +218,7 @@ class PositionMonitor:
                         self.storage.save(passport)
                         self.active_passports.pop(passport.passport_id, None)
                         self.managers.pop(passport.passport_id, None)
-                break
+                # ✅ ИСПРАВЛЕНО: Убран 'break', чтобы обработать закрытие позиций по всем символам в пакете
 
     async def _on_order_update(self, data: list):
         for order_info in data:
@@ -294,8 +318,8 @@ class PositionMonitor:
                                     reason=f"TP1 filled, pnl={tp1_pnl:.2f}", source="UDS")
 
                 try:
-                    commission_rate = self.config.get("trading.structure_validation.commission_rate", 0.0004)
-                    buffer_mult = self.config.get("trading.structure_validation.tp2_protection_buffer_mult", 3.0)
+                    commission_rate = self.config.get("trading", {}).get("structure_validation", {}).get("commission_rate", 0.0004)
+                    buffer_mult = self.config.get("trading", {}).get("structure_validation", {}).get("tp2_protection_buffer_mult", 3.0)
                     buffer = passport.entry_price * commission_rate * buffer_mult
                     
                     if passport.side == "LONG":
@@ -341,7 +365,7 @@ class PositionMonitor:
                 self.storage.save(passport)
 
             elif order_type in ("LIMIT_TP2", "STOP_SL", "STOP_SL_BE", "STOP_SL_PROTECT") and status == "Filled":
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Ставим флаг перед финализацией
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Ставим флаг перед финализацией
                 passport.is_closing = True
                 passport.closing_source = "UDS"
                 

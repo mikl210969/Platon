@@ -76,8 +76,8 @@ class GoldenBounceStrategy:
         self.entry_order_ttl_sec = float(health.get("entry_order_ttl_sec", 600))
         
         regime_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("regime_shift", {})
-        self.min_atr_ratio = float(regime_cfg.get("min_atr_ratio", 0.3))  # ✅ Синхронизировано с config
-        self.max_atr_ratio = float(regime_cfg.get("max_atr_ratio", 3.0))  # ✅ Синхронизировано с config
+        self.min_atr_ratio = float(regime_cfg.get("min_atr_ratio", 0.3))
+        self.max_atr_ratio = float(regime_cfg.get("max_atr_ratio", 3.0))
 
         self._pending_entries: Dict[str, Any] = {}
         self._atr_below_since: Optional[datetime] = None
@@ -304,6 +304,13 @@ class GoldenBounceStrategy:
                 self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "cooldown"})
                 return
 
+        # ✅ ПУТЬ А: Проверка наличия активной позиции ДО создания паспорта (Fail Fast)
+        if self.monitor is not None and self.monitor.has_active_position(self.symbol):
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "position_exists_on_exchange"})
+            logger.info(f"⏳ [{self.symbol}] Сигнал отклонен: уже есть активная позиция по {self.symbol}")
+            return
+
+        # Дополнительная проверка на лимит активных паспортов (на всякий случай)
         if self.monitor is not None and self.max_active_per_symbol > 0:
             from execution.passport_manager import is_terminal
             active = sum(1 for p in getattr(self.monitor, "active_passports", []) if getattr(p, "symbol", None) == self.symbol and not is_terminal(getattr(p, "status", "CLOSED")))
@@ -323,8 +330,6 @@ class GoldenBounceStrategy:
         if not delta_direction_ok:
             logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong cumulative delta direction (CumDelta: {zone.cumulative_delta:.2f})")
             return
-
-        # ✅ Z-Score фильтр ПОЛНОСТЬЮ УБРАН. Доверяем кумулятивной дельте.
 
         levels = zone.calculate_sl_tp(current_price)
         if levels is None:
