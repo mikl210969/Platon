@@ -322,10 +322,12 @@ class PositionMonitor:
                     buffer_mult = self.config.get("trading", {}).get("structure_validation", {}).get("tp2_protection_buffer_mult", 3.0)
                     buffer = passport.entry_price * commission_rate * buffer_mult
                     
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Переносим SL в БЕЗУБЫТОК (точка входа), а не к TP2.
+                    # Для LONG: SL выше входа. Для SHORT: SL ниже входа.
                     if passport.side == "LONG":
-                        new_sl_price = passport.tp2_price + buffer
-                    else:
-                        new_sl_price = passport.tp2_price - buffer
+                        new_sl_price = passport.entry_price + buffer
+                    else: # SHORT
+                        new_sl_price = passport.entry_price - buffer
 
                     filled_tp1_qty = next(
                         (o.get("qty", 0) for o in passport.orders 
@@ -339,13 +341,14 @@ class PositionMonitor:
                         if old_sl:
                             await self.om.rest.cancel_order(self.om.category, passport.symbol, old_sl["order_id"])
                             old_sl["status"] = "Cancelled"
-                            passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для tp2_protect")
+                            passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для breakeven protect")
                         
-                        trigger_dir = 1 if passport.side == "LONG" else 2
+                        # trigger_direction: 1 = Rise (для шорта, когда цена растет и задевает стоп), 2 = Fall (для лонга)
+                        trigger_dir = 1 if passport.side == "SHORT" else 2 
                         
                         new_sl_res = await self.om.rest.place_order(
                             category=self.om.category, symbol=passport.symbol,
-                            side="Sell" if passport.side == "LONG" else "Buy",
+                            side="Buy" if passport.side == "SHORT" else "Sell", # ✅ Явно указываем сторону закрытия
                             qty=str(remaining_qty), price="", order_type="Market",
                             trigger_price=str(new_sl_price), trigger_direction=trigger_dir,
                             reduce_only=True
@@ -353,14 +356,14 @@ class PositionMonitor:
                         new_sl_id = new_sl_res.get("orderId")
                         if new_sl_id:
                             passport.add_order_record(new_sl_id, "STOP_SL_BE", "New", float(new_sl_price), float(remaining_qty))
-                            passport.add_event("SUCCESS: TP2_PROTECT_ACTIVE", f"SL перенесен на TP2+буфер: {new_sl_price:.4f} на {remaining_qty} {passport.symbol}")
-                            logger.info(f"🛡️ [{passport.passport_id}] TP2_PROTECT: SL moved to {new_sl_price:.4f} for {remaining_qty} {passport.symbol}")
+                            passport.add_event("SUCCESS: BREAKEVEN_PROTECT_ACTIVE", f"SL перенесен в безубыток: {new_sl_price:.4f} на {remaining_qty} {passport.symbol}")
+                            logger.info(f"🛡️ [{passport.passport_id}] BREAKEVEN_PROTECT: SL moved to {new_sl_price:.4f} for {remaining_qty} {passport.symbol}")
                         else:
-                            passport.add_event("ERROR: TP2_PROTECT_FAILED", "Биржа не вернула orderId для нового SL")
-                            logger.error(f"❌ [{passport.passport_id}] Ошибка tp2_protect: нет orderId")
+                            passport.add_event("ERROR: BREAKEVEN_PROTECT_FAILED", "Биржа не вернула orderId для нового SL")
+                            logger.error(f"❌ [{passport.passport_id}] Ошибка breakeven_protect: нет orderId")
                 except Exception as e:
-                    passport.add_event("ERROR: TP2_PROTECT_EXCEPTION", str(e))
-                    logger.error(f"❌ [{passport.passport_id}] Исключение при tp2_protect: {e}")
+                    passport.add_event("ERROR: BREAKEVEN_PROTECT_EXCEPTION", str(e))
+                    logger.error(f"❌ [{passport.passport_id}] Исключение при breakeven_protect: {e}")
 
                 self.storage.save(passport)
 
