@@ -477,6 +477,17 @@ class GoldenBounceStrategy:
         if evt_type == "WALL_CONFIRMED":
             now = datetime.now(timezone.utc)
             price_f = float(price)
+            
+            # ✅ НОВАЯ ПРОВЕРКА: Жесткая валидация ценности стены в момент подтверждения
+            peak_vol = float(event.get("peak_volume", 0))
+            instr_cfg = self.config.get("instruments", {}).get(symbol, {})
+            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) # Fallback на всякий случай
+            
+            wall_value_usd = price_f * peak_vol
+            if wall_value_usd < min_wall_usd:
+                logger.info(f"🚫 [{symbol}] Стена отклонена при подтверждении: ценность {wall_value_usd:.0f} USDT < порога {min_wall_usd} USDT (Peak Vol: {peak_vol})")
+                return  # Прерываем создание зоны!
+
             atr = self._get_current_atr()
             multipliers = self._get_session_multipliers()
             k_wall = multipliers.get("k_wall", 2.0)
@@ -492,7 +503,7 @@ class GoldenBounceStrategy:
                 self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "dedup"})
                 return
             
-            zone = GBZone(symbol=symbol, price=price_f, side=str(side), created_at=now, atr_at_creation=atr, peak_volume=event.get("peak_volume", 0), score_multiplier=1.0)
+            zone = GBZone(symbol=symbol, price=price_f, side=str(side), created_at=now, atr_at_creation=atr, peak_volume=peak_vol, score_multiplier=1.0)
             zone.departure_threshold = zone.calculate_departure_threshold(self.atr_multiplier)
             self.active_zones.append(zone)
 

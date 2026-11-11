@@ -135,6 +135,10 @@ async def main():
 
     rest = BybitRestClient(api_key, api_secret, rest_url)
     uds = BybitPrivateWSClient(api_key, api_secret, ws_url, bus)
+    
+    # ✅ НОВОЕ: Синхронизация времени с сервером Bybit перед началом работы
+    logger.info("⏱️ Синхронизация времени с сервером Bybit...")
+    await rest.sync_time()
 
     # ✅ ОБЩИЙ ORDER MANAGER И MONITOR
     om = OrderManager(rest, category="linear", event_bus=bus)

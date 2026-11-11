@@ -18,11 +18,36 @@ class BybitRestClient:
         self.base_url = base_url
         self.recv_window = str(recv_window)
         self.session: Optional[aiohttp.ClientSession] = None
+        
+        # ✅ НОВОЕ: Смещение времени для синхронизации с сервером Bybit
+        self.time_offset_ms = 0
+        self._time_synced = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
         return self.session
+
+    async def sync_time(self):
+        """Синхронизирует локальное время с сервером Bybit."""
+        try:
+            session = await self._get_session()
+            # Публичный эндпоинт, не требует подписи
+            async with session.get(f"{self.base_url}/v5/market/time") as resp:
+                data = await resp.json()
+                if data.get("retCode") == 0:
+                    server_time_ms = int(data["result"]["timeSecond"]) * 1000
+                    local_time_ms = int(time.time() * 1000)
+                    self.time_offset_ms = server_time_ms - local_time_ms
+                    self._time_synced = True
+                    import logging
+                    logger = logging.getLogger("plato.bybit_rest")
+                    logger.info(f"⏱️ Время синхронизировано с Bybit. Смещение: {self.time_offset_ms} мс")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger("plato.bybit_rest")
+            logger.warning(f"⚠️ Не удалось синхронизировать время: {e}. Использую локальное.")
+            self.time_offset_ms = 0
 
     def _sign(self, timestamp: str, method: str, params: Optional[Dict]) -> str:
         param_str = f"{timestamp}{self.api_key}{self.recv_window}"
@@ -44,7 +69,7 @@ class BybitRestClient:
         start_time = time.time()
         try:
             session = await self._get_session()
-            timestamp = str(int(time.time() * 1000))
+            timestamp = str(int(time.time() * 1000) + self.time_offset_ms)
             
             headers: Dict[str, Any] = {
                 "X-BAPI-API-KEY": self.api_key,
