@@ -313,9 +313,12 @@ class OrderManager:
                 logger.error(f" [{passport.passport_id}] Размер позиции {pos_size} <= 0. Защита пропущена.")
                 return False
 
-            qty_half = self._round_down_qty(pos_size / 2.0, passport.symbol)
-            if qty_half <= 0:
-                qty_half = pos_size
+            # ✅ ИСПРАВЛЕНИЕ ХВОСТОВ: TP1 = половина, TP2 = весь остаток. Сумма всегда равна pos_size.
+            qty_tp1 = self._round_down_qty(pos_size / 2.0, passport.symbol)
+            qty_tp2 = self._round_down_qty(pos_size - qty_tp1, passport.symbol)
+            
+            if qty_tp1 <= 0: qty_tp1 = pos_size
+            if qty_tp2 <= 0: qty_tp2 = pos_size
                 
             qty_full = pos_size
             symbol = passport.symbol
@@ -323,21 +326,21 @@ class OrderManager:
             
             tp1_res = await self.rest.place_order(
                 category=self.category, symbol=symbol, side=side_exit,
-                qty=self._format_qty(qty_half, passport.symbol),
+                qty=self._format_qty(qty_tp1, passport.symbol),
                 price=str(passport.tp1_price),
                 order_type="Limit", time_in_force="GTC", reduce_only=True
             )
             tp1_id = tp1_res.get("orderId")
-            if tp1_id: passport.add_order_record(tp1_id, "LIMIT_TP1", "New", passport.tp1_price, float(qty_half))
+            if tp1_id: passport.add_order_record(tp1_id, "LIMIT_TP1", "New", passport.tp1_price, float(qty_tp1))
             
             tp2_res = await self.rest.place_order(
                 category=self.category, symbol=symbol, side=side_exit,
-                qty=self._format_qty(qty_half, passport.symbol),
+                qty=self._format_qty(qty_tp2, passport.symbol),
                 price=str(passport.tp2_price),
                 order_type="Limit", time_in_force="GTC", reduce_only=True
             )
             tp2_id = tp2_res.get("orderId")
-            if tp2_id: passport.add_order_record(tp2_id, "LIMIT_TP2", "New", passport.tp2_price, float(qty_half))
+            if tp2_id: passport.add_order_record(tp2_id, "LIMIT_TP2", "New", passport.tp2_price, float(qty_tp2))
 
             trigger_dir = 2 if passport.side == "LONG" else 1
             sl_res = await self.rest.place_order(
@@ -360,9 +363,7 @@ class OrderManager:
                 if self.storage:
                     self.storage.save(passport)
                 
-                # ✅ Сохраняем паспорт в JSON для анализа
                 self._save_passport_json(passport)
-                
                 return True
             else:
                 logger.error(f"❌ [{passport.passport_id}] Не все защитные ордера размещены. TP1:{bool(tp1_id)}, TP2:{bool(tp2_id)}, SL:{bool(sl_id)}")

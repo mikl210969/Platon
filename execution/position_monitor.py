@@ -322,11 +322,9 @@ class PositionMonitor:
                     buffer_mult = self.config.get("trading", {}).get("structure_validation", {}).get("tp2_protection_buffer_mult", 3.0)
                     buffer = passport.entry_price * commission_rate * buffer_mult
                     
-                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Переносим SL в БЕЗУБЫТОК (точка входа), а не к TP2.
-                    # Для LONG: SL выше входа. Для SHORT: SL ниже входа.
                     if passport.side == "LONG":
                         new_sl_price = passport.entry_price + buffer
-                    else: # SHORT
+                    else:
                         new_sl_price = passport.entry_price - buffer
 
                     filled_tp1_qty = next(
@@ -334,7 +332,18 @@ class PositionMonitor:
                         if o.get("type") == "LIMIT_TP1" and o.get("status") == "Filled"), 
                         0
                     )
-                    remaining_qty = passport.position_size - filled_tp1_qty
+                    
+                    # ✅ ИСПРАВЛЕНИЕ FLOATING POINT: Считаем остаток и округляем до шага биржи
+                    min_step_map = {
+                        "SOLUSDT": 0.1, "LINKUSDT": 1.0, "ETHUSDT": 0.01, 
+                        "BTCUSDT": 0.001, "BNBUSDT": 0.01, "AVAXUSDT": 0.1
+                    }
+                    min_step = min_step_map.get(passport.symbol, 0.01)
+                    import math
+                    raw_remaining = passport.position_size - filled_tp1_qty
+                    remaining_qty = math.floor(raw_remaining / min_step) * min_step
+                    decimals = len(str(min_step).split('.')[-1]) if '.' in str(min_step) else 0
+                    remaining_qty_str = f"{remaining_qty:.{decimals}f}"
 
                     if remaining_qty > 0:
                         old_sl = next((o for o in passport.orders if o.get("type") == "STOP_SL" and o.get("status") == "New"), None)
@@ -343,21 +352,20 @@ class PositionMonitor:
                             old_sl["status"] = "Cancelled"
                             passport.add_event("ACTION: SL_RESIZED", f"Старый SL ({old_sl['order_id']}) отменен для breakeven protect")
                         
-                        # trigger_direction: 1 = Rise (для шорта, когда цена растет и задевает стоп), 2 = Fall (для лонга)
                         trigger_dir = 1 if passport.side == "SHORT" else 2 
                         
                         new_sl_res = await self.om.rest.place_order(
                             category=self.om.category, symbol=passport.symbol,
-                            side="Buy" if passport.side == "SHORT" else "Sell", # ✅ Явно указываем сторону закрытия
-                            qty=str(remaining_qty), price="", order_type="Market",
+                            side="Buy" if passport.side == "SHORT" else "Sell",
+                            qty=remaining_qty_str, price="", order_type="Market",
                             trigger_price=str(new_sl_price), trigger_direction=trigger_dir,
                             reduce_only=True
                         )
                         new_sl_id = new_sl_res.get("orderId")
                         if new_sl_id:
                             passport.add_order_record(new_sl_id, "STOP_SL_BE", "New", float(new_sl_price), float(remaining_qty))
-                            passport.add_event("SUCCESS: BREAKEVEN_PROTECT_ACTIVE", f"SL перенесен в безубыток: {new_sl_price:.4f} на {remaining_qty} {passport.symbol}")
-                            logger.info(f"🛡️ [{passport.passport_id}] BREAKEVEN_PROTECT: SL moved to {new_sl_price:.4f} for {remaining_qty} {passport.symbol}")
+                            passport.add_event("SUCCESS: BREAKEVEN_PROTECT_ACTIVE", f"SL перенесен в безубыток: {new_sl_price:.4f} на {remaining_qty_str} {passport.symbol}")
+                            logger.info(f"🛡️ [{passport.passport_id}] BREAKEVEN_PROTECT: SL moved to {new_sl_price:.4f} for {remaining_qty_str} {passport.symbol}")
                         else:
                             passport.add_event("ERROR: BREAKEVEN_PROTECT_FAILED", "Биржа не вернула orderId для нового SL")
                             logger.error(f"❌ [{passport.passport_id}] Ошибка breakeven_protect: нет orderId")
