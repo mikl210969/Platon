@@ -1,6 +1,7 @@
 """
 Golden Bounce Strategy. 
 Версия: Golden Bounce & Retest (PF 7.06). Кумулятивная дельта, инвертированная логика поглощения, 48ч TTL.
+v2.1: Усиленный риск-менеджмент (учет комиссий), фильтр R:R, логирование sizing.
 """
 
 import logging
@@ -79,6 +80,12 @@ class GoldenBounceStrategy:
         self.min_atr_ratio = float(regime_cfg.get("min_atr_ratio", 0.3))
         self.max_atr_ratio = float(regime_cfg.get("max_atr_ratio", 3.0))
 
+        # ✅ v2.1: Параметры риск-менеджмента из конфига
+        risk_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("risk_management", {})
+        self.min_rr_ratio = float(risk_cfg.get("min_rr_ratio", 1.2))  # TP2_dist / SL_dist минимум
+        self.risk_slippage_mult = float(risk_cfg.get("risk_slippage_mult", 1.2))  # Допуск превышения риска
+        self.fee_rate = float(risk_cfg.get("fee_rate", 0.0004))  # Taker комиссия
+
         self._pending_entries: Dict[str, Any] = {}
         self._atr_below_since: Optional[datetime] = None
         self._last_signal_attempt: Optional[datetime] = None
@@ -90,7 +97,7 @@ class GoldenBounceStrategy:
         self.bus.subscribe(f"PUBLIC:ORDERBOOK:{symbol}", self._on_orderbook)
         self.bus.subscribe("ORDER:TIMER_CANCELLED", self._on_timer_cancelled)
 
-        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (Bounce & Retest | Cumulative Delta)")
+        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (Bounce & Retest | Cumulative Delta | v2.1 R:R filter)")
 
     def _get_current_session(self) -> str:
         hour = datetime.now(timezone.utc).hour
@@ -336,6 +343,29 @@ class GoldenBounceStrategy:
             self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "invalid_risk"})
             return
 
+        # ✅ v2.1: ФИЛЬТР R:R — расстояние до TP2 должно быть минимум min_rr_ratio × расстояние до SL
+        sl_dist = abs(levels["entry"] - levels["sl"])
+        tp2_dist = abs(levels["tp2"] - levels["entry"])
+        
+        if sl_dist <= 0:
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "zero_sl_distance"})
+            return
+        
+        rr_ratio = tp2_dist / sl_dist
+        if rr_ratio < self.min_rr_ratio:
+            logger.info(
+                f"🚫 [{self.symbol}] Отказ по R:R: TP2_dist ({tp2_dist:.2f}) < "
+                f"{self.min_rr_ratio} × SL_dist ({sl_dist:.2f}). R:R = {rr_ratio:.2f}"
+            )
+            self._log_autopsy("SIGNAL_REJECTED", {
+                "zone_id": zone.id, 
+                "reason": "poor_RR_ratio",
+                "rr_ratio": round(rr_ratio, 3),
+                "sl_dist": round(sl_dist, 4),
+                "tp2_dist": round(tp2_dist, 4)
+            })
+            return
+
         self._last_signal_attempt = now
         self._passport_attempts.append(now)
         self._passport_attempts = [t for t in self._passport_attempts if (now - t).total_seconds() < 3600]
@@ -356,36 +386,75 @@ class GoldenBounceStrategy:
             
             risk_per_unit = levels.get("risk_per_unit", 0.0)
             
-            if risk_per_unit > 0:
-                size = risk_usd / risk_per_unit
-            else:
+            if risk_per_unit <= 0:
                 logger.error(f"🚫 [{self.symbol}] Zero risk_per_unit. Aborting.")
                 return
 
-            if size > max_size:
-                logger.warning(f"[{self.symbol}] Size {size:.2f} capped to max {max_size}")
-                size = max_size
+            # ✅ v2.1: УСИЛЕННАЯ ПРОВЕРКА РИСКА С УЧЕТОМ КОМИССИЙ
+            # 1. Идеальный размер под целевой риск
+            ideal_size = risk_usd / risk_per_unit
             
-            if size < min_size:
-                logger.warning(f"[{self.symbol}] Size {size:.2f} below min {min_size}. Aborting.")
+            # 2. Применяем лимиты
+            final_size = max(min_size, min(ideal_size, max_size))
+            
+            # 3. Оцениваем реальные комиссии (вход + выход полным объемом по худшему сценарию SL)
+            notional = levels["entry"] * final_size
+            fees_estimate = notional * self.fee_rate * 2.5  # вход + выход + запас на проскальзывание
+            
+            # 4. Реальный долларовый риск = риск по цене + комиссии
+            sl_dist_usd = abs(levels["entry"] - levels["sl"])
+            # ✅ ФИКС ОШИБКИ Pylance: пересчитываем rr_ratio внутри метода (sl_dist_usd > 0 гарантирован выше)
+            tp2_dist = abs(levels["tp2"] - levels["entry"])
+            rr_ratio = (tp2_dist / sl_dist_usd) if sl_dist_usd > 0 else 0.0
+            actual_risk = (sl_dist_usd * final_size) + fees_estimate
+            
+            # 5. Жесткая проверка: если риск превышает лимит с допуском — ОТКАЗ
+            risk_limit = risk_usd * self.risk_slippage_mult
+            if actual_risk > risk_limit:
+                logger.warning(
+                    f"🚫 [{self.symbol}] Отказ от сделки: риск {actual_risk:.2f}$ > лимит {risk_limit:.2f}$ "
+                    f"(ideal={ideal_size:.4f}, max={max_size}, final={final_size:.4f}, "
+                    f"sl_dist={sl_dist_usd:.2f}, fees={fees_estimate:.2f})"
+                )
+                self._log_autopsy("SIGNAL_REJECTED", {
+                    "zone_id": zone.id, 
+                    "reason": "risk_limit_exceeded",
+                    "actual_risk": round(actual_risk, 2),
+                    "risk_limit": round(risk_limit, 2),
+                    "ideal_size": round(ideal_size, 4),
+                    "final_size": round(final_size, 4)
+                })
                 return
 
-            actual_risk_usdt = risk_per_unit * size
-            fee_rate = 0.0004  
+            size = final_size
+            
+            # Логирование sizing для аудита
+            logger.info(
+                f"📐 [{self.symbol}] Sizing: ideal={ideal_size:.4f} → final={final_size:.4f} "
+                f"(capped={final_size != ideal_size}, risk=${actual_risk:.2f} / ${risk_usd:.0f})"
+            )
+
+            # ✅ v2.1: Исправленный расчет комиссий — выход полным объемом по SL (худший случай)
+            actual_risk_usdt = sl_dist_usd * size
             notional_entry = levels["entry"] * size
-            notional_exit_tp1 = levels["tp1"] * (size * 0.5)
-            est_commission = (notional_entry + notional_exit_tp1) * fee_rate
+            notional_exit_full = levels["sl"] * size  # При SL выходим всем объемом
+            est_commission = (notional_entry + notional_exit_full) * self.fee_rate
             
-            gross_profit_tp1 = (size * 0.5) * abs(levels["tp1"] - levels["entry"])
-            required_profit = est_commission * 1.2  
+            # Проверка EV по TP2 (основная цель), а не только по TP1
+            gross_profit_tp2 = size * abs(levels["tp2"] - levels["entry"])
+            required_profit = est_commission * 1.5  # Прибыль должна минимум в 1.5 раза покрывать комиссии
             
-            if gross_profit_tp1 < required_profit:
-                logger.warning(f"🚫 [{self.symbol}] Positive EV Filter failed: GP=${gross_profit_tp1:.2f} < Req=${required_profit:.2f}")
+            if gross_profit_tp2 < required_profit:
+                logger.warning(
+                    f"🚫 [{self.symbol}] Positive EV Filter failed: "
+                    f"GP_TP2=${gross_profit_tp2:.2f} < Req=${required_profit:.2f}"
+                )
                 self._log_autopsy("SIGNAL_REJECTED", {
                     "zone_id": zone.id, 
                     "reason": "positive_ev_failed",
-                    "gp_usd": round(gross_profit_tp1, 2),
-                    "req_usd": round(required_profit, 2)
+                    "gp_tp2_usd": round(gross_profit_tp2, 2),
+                    "req_usd": round(required_profit, 2),
+                    "est_commission": round(est_commission, 2)
                 })
                 return
 
@@ -427,7 +496,10 @@ class GoldenBounceStrategy:
                     limit_price -= (offset_ticks * tick_size)
                 logger.info(f"📏 [{self.symbol}] Entry offset: {offset_ticks} ticks. Limit: {limit_price:.4f} (Wall: {levels['entry']:.4f})")
 
-            logger.info(f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {levels['entry']:.2f} | SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f}")
+            logger.info(
+                f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {levels['entry']:.2f} | "
+                f"SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f} | TP2: {levels['tp2']:.2f} | R:R={rr_ratio:.2f}"
+            )
 
             self._log_autopsy("SIGNAL_GENERATED", {
                 "zone_id": zone.id, 
@@ -441,7 +513,9 @@ class GoldenBounceStrategy:
                 "size": size, 
                 "be_price": be_price,
                 "cumulative_delta": zone.cumulative_delta,
-                "offset_ticks": offset_ticks
+                "offset_ticks": offset_ticks,
+                "rr_ratio": round(rr_ratio, 3),
+                "actual_risk_usd": round(actual_risk, 2)
             })
 
             await self.bus.publish("EXEC:NEW_TRADE", passport)
@@ -478,15 +552,15 @@ class GoldenBounceStrategy:
             now = datetime.now(timezone.utc)
             price_f = float(price)
             
-            # ✅ НОВАЯ ПРОВЕРКА: Жесткая валидация ценности стены в момент подтверждения
+            # ✅ Проверка ценности стены в момент подтверждения
             peak_vol = float(event.get("peak_volume", 0))
             instr_cfg = self.config.get("instruments", {}).get(symbol, {})
-            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) # Fallback на всякий случай
+            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
             
             wall_value_usd = price_f * peak_vol
             if wall_value_usd < min_wall_usd:
                 logger.info(f"🚫 [{symbol}] Стена отклонена при подтверждении: ценность {wall_value_usd:.0f} USDT < порога {min_wall_usd} USDT (Peak Vol: {peak_vol})")
-                return  # Прерываем создание зоны!
+                return
 
             atr = self._get_current_atr()
             multipliers = self._get_session_multipliers()

@@ -9,7 +9,9 @@ trading:
   filters:
     positive_ev:
       safety_margin: 1.2
-  symbols: ["SOLUSDT", "LINKUSDT", "ETHUSDT", "BTCUSDT", "BNBUSDT", "AVAXUSDT"]
+
+  symbols: ["SOLUSDT", "BTCUSDT", "ETHUSDT", "AVAXUSDT"]  # LINK и BNB временно вне
+
   category: "linear"
   
   exit_logic: "structure"
@@ -96,28 +98,27 @@ trading:
 instruments:
   SOLUSDT:
     enabled: true
-    min_wall_value_usd: 130000  # ✅ Поднято для отсечения шума (как в бэктесте)
-    
-  LINKUSDT:
-    enabled: true
-    min_wall_value_usd: 120000  # ✅ Поднято для отсечения шума
-    
-  ETHUSDT:
-    enabled: true
-    min_wall_value_usd: 150000  # ✅ Поднято для ловли только железобетонных уровней
+    min_wall_value_usd: 130000  # ✅ Флагман, не трогаем
     
   BTCUSDT:
     enabled: true
-    min_wall_value_usd: 300000  # ✅ Оставляем как есть (работает идеально)
+    min_wall_value_usd: 300000  # ✅ Оставляем, фильтр R:R теперь защищает от широких стопов
+    
+  ETHUSDT:
+    enabled: true
+    min_wall_value_usd: 250000  # ⬆️ 150k → 250k. Твоя идея, я поддерживаю
+    
+  LINKUSDT:
+    enabled: false  # ❌ Математически безнадежен: Avg Win 0.32 при комиссии 0.10+
+    min_wall_value_usd: 250000
     
   BNBUSDT:
-    enabled: true
-    min_wall_value_usd: 50000   # ✅ Слегка опущено для генерации сигналов
+    enabled: false  # ⏸️ Временно. Один стоп -30.93, мало данных. Вернем после SOL-эпохи
+    min_wall_value_usd: 80000  # Поднимем с 50k при возврате
     
   AVAXUSDT:
     enabled: true
-    min_wall_value_usd: 50000   # ✅ Слегка опущено для генерации сигналов
-    min_wall_value_usd: 50000
+    min_wall_value_usd: 50000  # Оставляем, 1 сделка в плюсе, пусть собирает данные
 
 self_test:
   enabled: false
