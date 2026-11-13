@@ -1,5 +1,5 @@
 # Конфигурация платформы PLATO V2
-# Версия: Golden Bounce & Retest (PF 7.06)
+# Версия: Golden Bounce & Retest (v2.1 Risk Management)
 
 bybit:
   use_testnet: false
@@ -38,6 +38,12 @@ trading:
 
   strategies:
     golden_bounce:
+      # ✅ v2.1: Новый блок управления рисками и R:R
+      risk_management:
+        min_rr_ratio: 1.2          # TP2_dist / SL_dist минимум
+        risk_slippage_mult: 1.2    # Допуск превышения target_risk (учет комиссий)
+        fee_rate: 0.0004           # Taker комиссия Bybit
+
       session_multipliers:
         asian_night:
           k_wall: 2.5
