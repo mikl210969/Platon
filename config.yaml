@@ -1,5 +1,5 @@
 # Конфигурация платформы PLATO V2
-# Версия: Golden Bounce & Retest (v2.1 Risk Management)
+# Версия: Golden Bounce & Retest (v2.2 Structural Pullback)
 
 bybit:
   use_testnet: false
@@ -13,9 +13,9 @@ trading:
   symbols: ["SOLUSDT", "BTCUSDT", "ETHUSDT", "AVAXUSDT"]  # LINK и BNB временно вне
 
   category: "linear"
-  
+
   exit_logic: "structure"
-  
+
   structure_validation:
     wall_volume_multiple: 1.5
     wall_baseline_bars: 28
@@ -24,13 +24,13 @@ trading:
     return_max_bars: 24
     post_tp1_logic: "tp2_protect"
     tp2_protection_buffer_mult: 3.0
-  
+
   risk:
     base_risk_usdt: 30.0
     max_position_size: 10.0
     min_position_size: 0.1
     max_daily_loss: 100.0
-  
+
   orders:
     breakeven_after_tp1: false
     planned_size: 10.0
@@ -38,12 +38,13 @@ trading:
 
   strategies:
     golden_bounce:
-      # ✅ v2.1: Новый блок управления рисками и R:R
+      # ✅ v2.1 + v2.2: Блок управления рисками, R:R и pullback-входом
       risk_management:
-        min_rr_ratio: 1.0          # ⬇️ Смягчили с 1.2 до 1.0 (разрешаем R:R 1:1)
-        risk_slippage_mult: 1.2    # Оставляем (защита от превышения риска)
-        fee_rate: 0.0004           # Оставляем
-        
+        min_rr_ratio: 1.0            # TP2_dist / SL_dist минимум
+        risk_slippage_mult: 1.2      # Допуск превышения target_risk (учет комиссий)
+        fee_rate: 0.0004             # Taker комиссия Bybit
+        pullback_entry_offset_pct: 0.0005  # ✅ v2.2: 0.05% смещение лимита от стены в нашу пользу
+
       session_multipliers:
         asian_night:
           k_wall: 2.5
@@ -67,8 +68,8 @@ trading:
           k_delta: 1.5
 
       regime_shift:
-        min_atr_ratio: 0.3   # ✅ ОСЛАБЛЕНО: было 0.5
-        max_atr_ratio: 3.0   # ✅ ОСЛАБЛЕНО: было 2.0
+        min_atr_ratio: 0.3
+        max_atr_ratio: 3.0
 
       health:
         min_atr_bps: 20
@@ -81,6 +82,8 @@ trading:
         max_passports_per_hour: 10
         max_zones_per_hour: 60
         entry_order_ttl_sec: 600
+        min_departure_atr_mult: 0.8   # ✅ v2.2: Минимальная глубина отката от стены в ATR
+        wall_broken_atr_mult: 0.1     # ✅ v2.2: Буфер пробоя стены (0.1 ATR) для инвалидации
 
       wall_persistence:
         min_consecutive_ticks: 2
@@ -99,29 +102,29 @@ trading:
         pull_cycle_demerit: 0.5
         max_pull_cycles: 3
 
-      entry_offset_ticks: 2
+      entry_offset_ticks: 2  # ⚠️ Deprecated в v2.2 (лимит теперь от стены через pullback_entry_offset_pct)
 
 instruments:
   SOLUSDT:
     enabled: true
     min_wall_value_usd: 130000  # ✅ Флагман, не трогаем
-    
+
   BTCUSDT:
     enabled: true
     min_wall_value_usd: 300000  # ✅ Оставляем, фильтр R:R теперь защищает от широких стопов
-    
+
   ETHUSDT:
     enabled: true
-    min_wall_value_usd: 250000  # ⬆️ 150k → 250k. Твоя идея, я поддерживаю
-    
+    min_wall_value_usd: 250000  # ⬆️ 150k → 250k
+
   LINKUSDT:
     enabled: false  # ❌ Математически безнадежен: Avg Win 0.32 при комиссии 0.10+
     min_wall_value_usd: 250000
-    
+
   BNBUSDT:
-    enabled: false  # ⏸️ Временно. Один стоп -30.93, мало данных. Вернем после SOL-эпохи
-    min_wall_value_usd: 80000  # Поднимем с 50k при возврате
-    
+    enabled: false  # ⏸️ Временно. Один стоп -30.93, мало данных.
+    min_wall_value_usd: 80000
+
   AVAXUSDT:
     enabled: true
     min_wall_value_usd: 50000  # Оставляем, 1 сделка в плюсе, пусть собирает данные

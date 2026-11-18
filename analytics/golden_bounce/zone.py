@@ -69,35 +69,46 @@ class GBZone:
         else:
             return self.price + actual_distance
 
-    def check_departure(self, current_price: float, atr_multiplier: float = 1.5) -> bool:
+    def check_departure(self, current_price: float, atr_multiplier: float = 1.5, min_departure_atr_mult: float = 0.8) -> bool:
+        """
+        Проверяет, произошел ли структурный откат от стены.
+        min_departure_atr_mult: минимальный откат от стены (в ATR), чтобы считать департуру валидной.
+        """
+        # Если уже департировали, продолжаем обновлять extreme_price, чтобы найти самую глубокую точку
+        if self.status == ZoneStatus.DEPARTED and self.extreme_price is not None:
+            if self.side == "bid" and current_price < self.extreme_price:
+                self.extreme_price = current_price
+            elif self.side == "ask" and current_price > self.extreme_price:
+                self.extreme_price = current_price
+            return True # Уже департировали, возвращаем True для триггера возврата позже
+
         if self.status != ZoneStatus.CONFIRMED:
-            if self.status == ZoneStatus.DEPARTED and self.extreme_price is not None:
-                if self.side == "bid" and current_price < self.extreme_price:
-                    self.extreme_price = current_price
-                elif self.side == "ask" and current_price > self.extreme_price:
-                    self.extreme_price = current_price
             return False
 
-        distance = atr_multiplier * self.atr_at_creation
+        # 1. Вычисляем требуемую глубину отката от СТЕНЫ (не от текущей цены)
+        required_distance = min_departure_atr_mult * self.atr_at_creation
         max_distance_pct = self.price * 0.04
-        actual_distance = min(distance, max_distance_pct)
+        actual_required = min(required_distance, max_distance_pct)
 
-        threshold = self.price - actual_distance if self.side == "bid" else self.price + actual_distance
-        passed = False
+        # 2. Проверяем, ушла ли цена достаточно далеко от стены
+        current_distance = abs(self.price - current_price)
 
-        if self.side == "bid" and current_price <= threshold:
-            passed = True
-        elif self.side == "ask" and current_price >= threshold:
-            passed = True
+        # Обновляем extreme_price в процессе движения, даже если порог еще не достигнут
+        if self.side == "bid" and current_price < (self.extreme_price or self.price):
+            self.extreme_price = current_price
+        elif self.side == "ask" and current_price > (self.extreme_price or self.price):
+            self.extreme_price = current_price
 
-        if passed:
-            self.departure_threshold = threshold
+        # 3. Если порог достигнут — фиксируем департуру
+        if current_distance >= actual_required:
+            self.departure_threshold = self.price - actual_required if self.side == "bid" else self.price + actual_required
             self.status = ZoneStatus.DEPARTED
             self.departure_confirmed_at = datetime.now(timezone.utc)
             self.high_price = self.price
-            self.extreme_price = current_price
+            # extreme_price уже обновлен выше, оставляем его как есть (это лучшая точка отката на данный момент)
+            return True
 
-        return passed
+        return False
 
     def update_cumulative_delta(self, signed_delta: float):
         self.cumulative_delta += signed_delta
@@ -149,14 +160,17 @@ class GBZone:
         if self.extreme_price is None or self.price is None:
             return None
 
+        # Департура считается от стены до extreme_price
         departure_abs = abs(self.price - self.extreme_price)
-        buffer = self.extreme_price * 0.002 
+        
+        # Буфер стопа: 0.2% от extreme_price или минимум 1 тик
+        buffer = max(self.extreme_price * 0.002, 0.01) 
 
-        if self.side == "bid":
+        if self.side == "bid": # LONG
             sl = self.extreme_price - buffer
             tp1 = current_entry_price + (departure_abs * 0.5)
             tp2 = current_entry_price + departure_abs
-        else:
+        else: # SHORT
             sl = self.extreme_price + buffer
             tp1 = current_entry_price - (departure_abs * 0.5)
             tp2 = current_entry_price - departure_abs
