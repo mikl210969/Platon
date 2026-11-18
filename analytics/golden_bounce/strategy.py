@@ -38,13 +38,19 @@ class GoldenBounceStrategy:
         self.market_buffer = market_buffer
         self.symbol = symbol
 
-        raw_config = {}
+        # ✅ ИСПРАВЛЕНИЕ: Корректное извлечение конфига из объекта Config
+        self.config = {}
         if config is not None:
             if isinstance(config, dict):
-                raw_config = config
+                self.config = config
+            elif hasattr(config, 'get'):
+                # Если передан объект Config с методом get, используем его напрямую
+                self.config = config
             else:
-                raw_config = getattr(config, 'data', None) or getattr(config, '_data', None) or {}
-        self.config = raw_config
+                # Пытаемся достать словарь из стандартных атрибутов на крайний случай
+                self.config = getattr(config, 'data', None) or \
+                              getattr(config, '_data', None) or \
+                              getattr(config, 'config', None) or {}
 
         gb_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("wall_persistence", {})
         if not gb_cfg:
@@ -579,13 +585,19 @@ class GoldenBounceStrategy:
         if evt_type == "WALL_CONFIRMED":
             now = datetime.now(timezone.utc)
             price_f = float(price)
-
-            # ✅ Проверка ценности стены в момент подтверждения
+            
+            # ✅ Универсальное получение настроек инструмента
+            instr_cfg = {}
+            if hasattr(self.config, 'get'):
+                instr_cfg = self.config.get("instruments", {}).get(symbol, {})
+            elif isinstance(self.config, dict):
+                instr_cfg = self.config.get("instruments", {}).get(symbol, {})
+                
+            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) if instr_cfg else 50000
+            
             peak_vol = float(event.get("peak_volume", 0))
-            instr_cfg = self.config.get("instruments", {}).get(symbol, {})
-            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
-
             wall_value_usd = price_f * peak_vol
+            
             if wall_value_usd < min_wall_usd:
                 logger.info(f"🚫 [{symbol}] Стена отклонена при подтверждении: ценность {wall_value_usd:.0f} USDT < порога {min_wall_usd} USDT (Peak Vol: {peak_vol})")
                 return
