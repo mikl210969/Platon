@@ -10,7 +10,7 @@ trading:
     positive_ev:
       safety_margin: 1.2
 
-  symbols: ["SOLUSDT", "BTCUSDT", "ETHUSDT", "AVAXUSDT"]  # LINK и BNB временно вне
+  symbols: ["SOLUSDT", "BTCUSDT", "ETHUSDT", "AVAXUSDT", "LINKUSDT", "BNBUSDT"]
 
   category: "linear"
 
@@ -107,27 +107,27 @@ trading:
 instruments:
   SOLUSDT:
     enabled: true
-    min_wall_value_usd: 130000  # ✅ Флагман, не трогаем
+    min_wall_value_usd: 130000
 
   BTCUSDT:
     enabled: true
-    min_wall_value_usd: 300000  # ✅ Оставляем, фильтр R:R теперь защищает от широких стопов
+    min_wall_value_usd: 300000
 
   ETHUSDT:
     enabled: true
-    min_wall_value_usd: 250000  # ⬆️ 150k → 250k
-
-  LINKUSDT:
-    enabled: false  # ❌ Математически безнадежен: Avg Win 0.32 при комиссии 0.10+
     min_wall_value_usd: 250000
 
+  LINKUSDT:
+    enabled: true
+    min_wall_value_usd: 200000
+
   BNBUSDT:
-    enabled: false  # ⏸️ Временно. Один стоп -30.93, мало данных.
-    min_wall_value_usd: 80000
+    enabled: true
+    min_wall_value_usd: 100000
 
   AVAXUSDT:
     enabled: true
-    min_wall_value_usd: 50000  # Оставляем, 1 сделка в плюсе, пусть собирает данные
+    min_wall_value_usd: 50000
 
 self_test:
   enabled: false
