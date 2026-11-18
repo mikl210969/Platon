@@ -80,24 +80,38 @@ class GBZone:
                 self.extreme_price = current_price
             elif self.side == "ask" and current_price > self.extreme_price:
                 self.extreme_price = current_price
-            return True # Уже департировали, возвращаем True для триггера возврата позже
+            return True
 
         if self.status != ZoneStatus.CONFIRMED:
             return False
 
-        # 1. Вычисляем требуемую глубину отката от СТЕНЫ (не от текущей цены)
+        # 1. Вычисляем требуемую глубину отката от СТЕНЫ
         required_distance = min_departure_atr_mult * self.atr_at_creation
         max_distance_pct = self.price * 0.04
         actual_required = min(required_distance, max_distance_pct)
 
-        # 2. Проверяем, ушла ли цена достаточно далеко от стены
-        current_distance = abs(self.price - current_price)
+        # 2. Проверяем направление движения
+        # Для LONG (bid): цена должна уйти ВНИЗ от стены
+        # Для SHORT (ask): цена должна уйти ВВЕРХ от стены
+        if self.side == "bid":
+            if current_price >= self.price:
+                # Цена не ушла вниз, отката нет
+                return False
+            current_distance = self.price - current_price
+        else:  # ask (SHORT)
+            if current_price <= self.price:
+                # Цена не ушла вверх, отката нет
+                return False
+            current_distance = current_price - self.price
 
-        # Обновляем extreme_price в процессе движения, даже если порог еще не достигнут
-        if self.side == "bid" and current_price < (self.extreme_price or self.price):
+        # Обновляем extreme_price (мы уже проверили направление)
+        if self.extreme_price is None:
             self.extreme_price = current_price
-        elif self.side == "ask" and current_price > (self.extreme_price or self.price):
-            self.extreme_price = current_price
+        else:
+            if self.side == "bid" and current_price < self.extreme_price:
+                self.extreme_price = current_price
+            elif self.side == "ask" and current_price > self.extreme_price:
+                self.extreme_price = current_price
 
         # 3. Если порог достигнут — фиксируем департуру
         if current_distance >= actual_required:
@@ -105,7 +119,6 @@ class GBZone:
             self.status = ZoneStatus.DEPARTED
             self.departure_confirmed_at = datetime.now(timezone.utc)
             self.high_price = self.price
-            # extreme_price уже обновлен выше, оставляем его как есть (это лучшая точка отката на данный момент)
             return True
 
         return False
