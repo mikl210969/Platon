@@ -1,9 +1,7 @@
 """
 Golden Bounce Strategy.
-Версия: Golden Bounce & Retest (PF 7.06). Кумулятивная дельта, инвертированная логика поглощения, 48ч TTL.
-v2.1: Усиленный риск-менеджмент (учет комиссий), фильтр R:R, логирование sizing.
-v2.2: Структурный pullback: минимальная глубина отката, лимит от стены со смещением,
-      инвалидация при пробое стены, фильтр микростопов (ideal_size > max*2).
+Версия: v3.3. Мультивалютная, USDT-ориентированный риск, Swing SL, early_BE, 
+инструмент-специфичные фильтры.
 """
 
 import logging
@@ -38,19 +36,14 @@ class GoldenBounceStrategy:
         self.market_buffer = market_buffer
         self.symbol = symbol
 
-        # ✅ ИСПРАВЛЕНИЕ: Корректное извлечение конфига из объекта Config
         self.config = {}
         if config is not None:
             if isinstance(config, dict):
                 self.config = config
             elif hasattr(config, 'get'):
-                # Если передан объект Config с методом get, используем его напрямую
                 self.config = config
             else:
-                # Пытаемся достать словарь из стандартных атрибутов на крайний случай
-                self.config = getattr(config, 'data', None) or \
-                              getattr(config, '_data', None) or \
-                              getattr(config, 'config', None) or {}
+                self.config = getattr(config, 'data', None) or getattr(config, '_data', None) or getattr(config, 'config', None) or {}
 
         gb_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("wall_persistence", {})
         if not gb_cfg:
@@ -72,8 +65,15 @@ class GoldenBounceStrategy:
         self.delta_window_sec = 60
         self.delta_short_window_sec = 15
 
-        health = (self.config.get("trading", {}).get("strategies", {})
-                  .get("golden_bounce", {}).get("health", {}))
+        # ✅ НОВОЕ: История баров для Swing SL (общая для всех зон символа)
+        self.bar_history: List[Dict] = []
+        self._current_bar_time_ms: int = 0
+        
+        # ✅ НОВОЕ: Конфиг Swing SL и фильтров
+        self.swing_sl_cfg = self.config.get("trading", {}).get("swing_sl", {})
+        self.instrument_filters = self.config.get("trading", {}).get("instrument_filters", {})
+
+        health = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("health", {})
         self.min_atr_bps = float(health.get("min_atr_bps", 20))
         self.dead_market_hysteresis_sec = float(health.get("dead_market_hysteresis_sec", 600))
         self.zone_dedup_atr_mult = float(health.get("zone_dedup_atr_mult", 1.5))
@@ -83,22 +83,18 @@ class GoldenBounceStrategy:
         self.max_passports_per_hour = int(health.get("max_passports_per_hour", 10))
         self.max_zones_per_hour = int(health.get("max_zones_per_hour", 60))
         self.entry_order_ttl_sec = float(health.get("entry_order_ttl_sec", 600))
-
-        # ✅ v2.2: Структурные параметры отката и пробоя стены
         self.min_departure_atr_mult = float(health.get("min_departure_atr_mult", 0.8))
-        self.wall_broken_atr_mult = float(health.get("wall_broken_atr_mult", 0.1))
+        self.sl_buffer_pct = float(health.get("sl_buffer_pct", 0.002))
+        self.tp1_fraction = float(health.get("tp1_fraction", 0.5))
 
         regime_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("regime_shift", {})
         self.min_atr_ratio = float(regime_cfg.get("min_atr_ratio", 0.3))
         self.max_atr_ratio = float(regime_cfg.get("max_atr_ratio", 3.0))
 
-        # ✅ v2.1: Параметры риск-менеджмента из конфига
         risk_cfg = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("risk_management", {})
         self.min_rr_ratio = float(risk_cfg.get("min_rr_ratio", 1.0))
         self.risk_slippage_mult = float(risk_cfg.get("risk_slippage_mult", 1.2))
         self.fee_rate = float(risk_cfg.get("fee_rate", 0.0004))
-        # ✅ v2.2: Смещение лимитного ордера от стены в нашу пользу (0.05%)
-        self.pullback_entry_offset_pct = float(risk_cfg.get("pullback_entry_offset_pct", 0.0005))
 
         self._pending_entries: Dict[str, Any] = {}
         self._atr_below_since: Optional[datetime] = None
@@ -111,7 +107,7 @@ class GoldenBounceStrategy:
         self.bus.subscribe(f"PUBLIC:ORDERBOOK:{symbol}", self._on_orderbook)
         self.bus.subscribe("ORDER:TIMER_CANCELLED", self._on_timer_cancelled)
 
-        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (v2.2 structural pullback)")
+        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (v3.3 USDT-Risk + Swing SL + early_BE)")
 
     def _get_current_session(self) -> str:
         hour = datetime.now(timezone.utc).hour
@@ -173,7 +169,6 @@ class GoldenBounceStrategy:
         zone.status = ZoneStatus.INVALIDATED
         zone.invalidation_reason = reason
         logger.info(f"⛔ [{self.symbol}] Zone {zone.id} INVALIDATED ({reason})")
-
         if reason == "WALL_CONSUMED": return
 
         pending = self._pending_entries.pop(zone.id, None)
@@ -197,17 +192,51 @@ class GoldenBounceStrategy:
             from pathlib import Path
             data_dir = Path("data"); data_dir.mkdir(parents=True, exist_ok=True)
             zones_file = data_dir / f"active_zones_{self.symbol}.json"
-            zones_data = []
-            for z in self.active_zones:
-                zones_data.append({
-                    "id": z.id, "price": z.price, "volume": z.peak_volume,
-                    "timestamp": z.created_at.isoformat(), "state": z.status.value, "side": z.trade_side,
-                    "min_price_after": z.extreme_price if z.side == "bid" else None,
-                    "max_price_after": z.extreme_price if z.side == "ask" else None,
-                    "cumulative_delta": round(z.cumulative_delta, 2)
-                })
+            zones_data = [{
+                "id": z.id, "price": z.price, "volume": z.peak_volume,
+                "timestamp": z.created_at.isoformat(), "state": z.status.value, "side": z.trade_side,
+                "min_price_after": z.extreme_price if z.side == "bid" else None,
+                "max_price_after": z.extreme_price if z.side == "ask" else None,
+                "cumulative_delta": round(z.cumulative_delta, 2),
+                "return_bars": z.calculate_return_bars(),
+                "return_delta": round(z.calculate_return_delta(), 2)
+            } for z in self.active_zones]
             with open(zones_file, "w", encoding="utf-8") as f: json.dump(zones_data, f, indent=2, ensure_ascii=False, default=str)
         except Exception as e: logger.error(f"Ошибка записи active_zones: {e}")
+
+    def _update_bar_history(self, ts_ms: int, price: float):
+        """✅ НОВОЕ: Обновляет историю баров для Swing SL."""
+        if price <= 0 or ts_ms <= 0:
+            return
+        
+        # Floor до 5-минутной свечи (300 000 мс)
+        bar_time_ms = (ts_ms // 300000) * 300000
+        
+        if not self.bar_history or self.bar_history[-1]["time"] < bar_time_ms:
+            # Новая свеча
+            self.bar_history.append({
+                "time": bar_time_ms,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price
+            })
+            self._current_bar_time_ms = bar_time_ms
+        else:
+            # Обновляем текущую свечу
+            last = self.bar_history[-1]
+            last["high"] = max(last["high"], price)
+            last["low"] = min(last["low"], price)
+            last["close"] = price
+        
+        # Ограничиваем историю 200 барами
+        if len(self.bar_history) > 200:
+            self.bar_history = self.bar_history[-200:]
+        
+        # Обновляем bar_history во всех активных зонах
+        for zone in self.active_zones:
+            if zone.status != ZoneStatus.INVALIDATED:
+                zone.bar_history = self.bar_history
 
     async def _on_trade_tape(self, trades: List[Dict]):
         try:
@@ -219,15 +248,18 @@ class GoldenBounceStrategy:
                 ts_ms = t.get("T", 0)
                 if ts_ms <= 0: continue
                 trade_ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-
                 side = t.get("S", "")
                 qty = float(t.get("v", 0) or t.get("qty", 0) or 0.0)
+                price = float(t.get("p", 0) or t.get("price", 0) or 0.0)
+                
                 if side == "Buy": signed_delta = qty
                 elif side == "Sell": signed_delta = -qty
                 else: continue
 
-                self.delta_buffer.append((trade_ts, signed_delta))
+                # ✅ Обновляем историю баров
+                self._update_bar_history(ts_ms, price)
 
+                self.delta_buffer.append((trade_ts, signed_delta))
                 for zone in self.active_zones:
                     if zone.status != ZoneStatus.INVALIDATED:
                         zone.update_cumulative_delta(signed_delta)
@@ -238,13 +270,10 @@ class GoldenBounceStrategy:
 
             for zone in self.active_zones:
                 if zone.status not in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING): continue
-
                 net_60 = sum(d for _, d in self.delta_buffer)
                 gross_60 = sum(abs(d) for _, d in self.delta_buffer)
                 net_15 = sum(d for ts, d in self.delta_buffer if ts >= cutoff_short)
-
                 zone.update_delta_metrics(net_60, net_15, gross_60)
-
         except Exception as e:
             logger.error(f"[{self.symbol}] Error in _on_trade_tape: {e}", exc_info=True)
 
@@ -270,7 +299,6 @@ class GoldenBounceStrategy:
                 if best_bid_price * best_bid_vol >= min_wall_usd:
                     event = await self.wall_tracker.update_ob(self.symbol, best_bid_price, best_bid_vol, "bid", now)
                     if event: await self._handle_wall_event(event)
-
             if asks:
                 best_ask_price, best_ask_vol = float(asks[0][0]), float(asks[0][1])
                 if best_ask_price * best_ask_vol >= min_wall_usd:
@@ -294,18 +322,7 @@ class GoldenBounceStrategy:
                 await self._invalidate_zone(zone, "EXPIRED")
                 continue
 
-            # ✅ v2.2: Инвалидация, если стена пробита в неправильную сторону
-            if zone.status in (ZoneStatus.DEPARTED, ZoneStatus.RETURNING, ZoneStatus.SIGNAL_READY):
-                broken_buffer = zone.atr_at_creation * self.wall_broken_atr_mult
-                if zone.side == "bid" and current_price > (zone.price + broken_buffer):
-                    await self._invalidate_zone(zone, "WALL_BROKEN_UP")
-                    continue
-                elif zone.side == "ask" and current_price < (zone.price - broken_buffer):
-                    await self._invalidate_zone(zone, "WALL_BROKEN_DOWN")
-                    continue
-
             if zone.status == ZoneStatus.CONFIRMED:
-                # ✅ v2.2: передаем минимальную глубину отката
                 if zone.check_departure(current_price, k_retracement, self.min_departure_atr_mult):
                     dept = abs(zone.price - (zone.extreme_price or zone.price))
                     logger.info(f"📉 [{self.symbol}] ZONE DEPARTED: {zone.id} ({zone.trade_side}) @ {zone.price} | Extreme: {zone.extreme_price} | Dept: {dept:.2f}")
@@ -314,7 +331,10 @@ class GoldenBounceStrategy:
                 if zone.is_return_expired(now):
                     await self._invalidate_zone(zone, "RETURN_TIMEOUT")
                 elif zone.check_return(current_price):
-                    logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | CumDelta: {zone.cumulative_delta:.2f}")
+                    return_bars = zone.calculate_return_bars()
+                    return_delta = zone.calculate_return_delta()
+                    logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | "
+                              f"return_bars={return_bars} | return_delta={return_delta:.2f} | CumDelta: {zone.cumulative_delta:.2f}")
                     await self._evaluate_signal(zone, current_price)
                     zone.status = ZoneStatus.SIGNAL_READY
 
@@ -328,19 +348,78 @@ class GoldenBounceStrategy:
 
         self._save_active_zones()
 
+    def _check_instrument_filter(self, zone: GBZone) -> bool:
+        """✅ НОВОЕ: Проверяет инструмент-специфичный фильтр возврата."""
+        instr_filter = self.instrument_filters.get(self.symbol)
+        if not instr_filter:
+            return True  # Нет фильтра — пропускаем
+        
+        filter_type = instr_filter.get("type")
+        threshold = instr_filter.get("threshold", 0)
+        
+        if filter_type == "return_bars_max":
+            return_bars = zone.calculate_return_bars()
+            if return_bars is None:
+                self._log_autopsy("SIGNAL_REJECTED", {
+                    "zone_id": zone.id,
+                    "reason": "return_bars_unknown"
+                })
+                return False
+            if return_bars > threshold:
+                self._log_autopsy("SIGNAL_REJECTED", {
+                    "zone_id": zone.id,
+                    "reason": "return_bars_filter",
+                    "return_bars": return_bars,
+                    "threshold": threshold,
+                    "filter": f"{self.symbol}:{filter_type}"
+                })
+                logger.info(f"⏱️ [{self.symbol}] RETURN_BARS FILTER: {return_bars} > {threshold}, reject")
+                return False
+            logger.info(f"✅ [{self.symbol}] RETURN_BARS FILTER PASSED: {return_bars} <= {threshold}")
+            return True
+        
+        elif filter_type == "delta_agree":
+            return_delta = zone.calculate_return_delta()
+            if zone.trade_side == "LONG":
+                # LONG: возврат должен быть с покупками (положительная дельта)
+                if return_delta <= threshold:
+                    self._log_autopsy("SIGNAL_REJECTED", {
+                        "zone_id": zone.id,
+                        "reason": "delta_agree_filter",
+                        "return_delta": return_delta,
+                        "threshold": threshold,
+                        "side": "LONG",
+                        "filter": f"{self.symbol}:{filter_type}"
+                    })
+                    logger.info(f"📉 [{self.symbol}] DELTA_AGREE FILTER (LONG): delta={return_delta:.2f} <= {threshold}, reject")
+                    return False
+            else:
+                # SHORT: возврат должен быть с продажами (отрицательная дельта)
+                if return_delta >= -threshold:
+                    self._log_autopsy("SIGNAL_REJECTED", {
+                        "zone_id": zone.id,
+                        "reason": "delta_agree_filter",
+                        "return_delta": return_delta,
+                        "threshold": threshold,
+                        "side": "SHORT",
+                        "filter": f"{self.symbol}:{filter_type}"
+                    })
+                    logger.info(f"📈 [{self.symbol}] DELTA_AGREE FILTER (SHORT): delta={return_delta:.2f} >= {-threshold}, reject")
+                    return False
+            logger.info(f"✅ [{self.symbol}] DELTA_AGREE FILTER PASSED: delta={return_delta:.2f}")
+            return True
+        
+        return True
+
     async def _evaluate_signal(self, zone: GBZone, current_price: float):
         now = datetime.now(timezone.utc)
 
-        if self._last_signal_attempt is not None:
-            since = (now - self._last_signal_attempt).total_seconds()
-            if since < self.signal_cooldown_sec:
-                self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "cooldown"})
-                return
+        if self._last_signal_attempt is not None and (now - self._last_signal_attempt).total_seconds() < self.signal_cooldown_sec:
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "cooldown"})
+            return
 
-        # ✅ ПУТЬ А: Проверка наличия активной позиции ДО создания паспорта (Fail Fast)
         if self.monitor is not None and self.monitor.has_active_position(self.symbol):
             self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "position_exists_on_exchange"})
-            logger.info(f"⏳ [{self.symbol}] Сигнал отклонен: уже есть активная позиция по {self.symbol}")
             return
 
         if self.monitor is not None and self.max_active_per_symbol > 0:
@@ -355,20 +434,72 @@ class GoldenBounceStrategy:
             await self._invalidate_zone(zone, "WALL_GONE" if wall_status == "GONE" else "WALL_CONSUMED")
             return
 
-        # === ФИЛЬТР: КУМУЛЯТИВНАЯ ДЕЛЬТА ===
-        delta_direction_ok = (zone.side == "bid" and zone.cumulative_delta < 0) or \
-                             (zone.side == "ask" and zone.cumulative_delta > 0)
-
-        if not delta_direction_ok:
-            logger.info(f"⏳ [{self.symbol}] Zone {zone.id} wrong cumulative delta direction (CumDelta: {zone.cumulative_delta:.2f})")
+        # ✅ НОВОЕ: Инструмент-специфичный фильтр возврата
+        if not self._check_instrument_filter(zone):
             return
 
-        levels = zone.calculate_sl_tp(current_price)
+        # ========================================================================
+        # ФИЛЬТР: АСИММЕТРИЯ ДЕЛЬТЫ (Delta Asymmetry Ratio - DAR)
+        # ========================================================================
+        current_atr = self._get_current_atr()
+        if current_atr <= 0: current_atr = 0.5
+        
+        delta_bounce = abs(zone.delta_bounce_snapshot)
+        delta_return = abs(zone.cumulative_delta - zone.delta_bounce_snapshot)
+        
+        extreme = zone.extreme_price if zone.extreme_price else zone.price
+        departure_usd = abs(extreme - zone.price)
+        departure_atr_mult = departure_usd / current_atr
+        
+        min_absolute_delta = max(10.0, current_atr * 0.05)
+        
+        if delta_bounce < min_absolute_delta and departure_atr_mult < 2.0:
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "weak_bounce_absolute", "delta_bounce": delta_bounce, "departure_atr_mult": departure_atr_mult})
+            return
+
+        delta_bounce_usd = delta_bounce * zone.price
+        normalized_bounce = delta_bounce_usd / current_atr
+        
+        if normalized_bounce < 0.5:
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "weak_bounce_normalized", "norm_delta": normalized_bounce})
+            return
+
+        min_dar_ratio = 1.8
+        ratio = delta_bounce / max(delta_return, 1.0)
+        
+        if ratio < min_dar_ratio:
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "aggressive_return", "dar_ratio": round(ratio, 2), "delta_return": delta_return})
+            return
+            
+        if delta_return < 10.0:
+            logger.info(f"🎯 [{self.symbol}] Zone {zone.id} ИДЕАЛЬНЫЙ РЕТЕСТ: delta_return={delta_return:.1f}")
+            
+        logger.info(f"✅ [{self.symbol}] Zone {zone.id} ФИЛЬТР ДЕЛЬТЫ ПРОЙДЕН: bounce={delta_bounce:.1f}, return={delta_return:.1f}, DAR={ratio:.2f}")
+        # ========================================================================
+
+        # 1. Получаем базовые уровни от зоны
+        tick_size_map = {"SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01, "XRPUSDT": 0.0001}
+        tick_size = tick_size_map.get(self.symbol, 0.01)
+        offset_ticks = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("entry_offset_ticks", 1)
+
+        if zone.trade_side == "LONG":
+            entry_price = zone.price + (tick_size * offset_ticks)
+        else:
+            entry_price = zone.price - (tick_size * offset_ticks)
+
+        # ✅ НОВОЕ: Swing SL + передаём bar_history в зону
+        zone.bar_history = self.bar_history
+        levels = zone.calculate_sl_tp(
+            entry_price, 
+            self.sl_buffer_pct, 
+            self.tp1_fraction,
+            swing_sl_cfg=self.swing_sl_cfg,
+            atr=current_atr
+        )
         if levels is None:
             self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "invalid_risk"})
             return
 
-        # ✅ v2.1: ФИЛЬТР R:R
         sl_dist = abs(levels["entry"] - levels["sl"])
         tp2_dist = abs(levels["tp2"] - levels["entry"])
 
@@ -378,25 +509,14 @@ class GoldenBounceStrategy:
 
         rr_ratio = tp2_dist / sl_dist
         if rr_ratio < self.min_rr_ratio:
-            logger.info(
-                f"🚫 [{self.symbol}] Отказ по R:R: TP2_dist ({tp2_dist:.2f}) < "
-                f"{self.min_rr_ratio} × SL_dist ({sl_dist:.2f}). R:R = {rr_ratio:.2f}"
-            )
-            self._log_autopsy("SIGNAL_REJECTED", {
-                "zone_id": zone.id,
-                "reason": "poor_RR_ratio",
-                "rr_ratio": round(rr_ratio, 3),
-                "sl_dist": round(sl_dist, 4),
-                "tp2_dist": round(tp2_dist, 4)
-            })
+            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "poor_RR_ratio", "rr_ratio": round(rr_ratio, 3)})
             return
 
+        logger.info(f"✅ [{self.symbol}] Zone {zone.id} ПРОШЛА ВСЕ ФИЛЬТРЫ! Создаем паспорт...")
         self._last_signal_attempt = now
         self._passport_attempts.append(now)
         self._passport_attempts = [t for t in self._passport_attempts if (now - t).total_seconds() < 3600]
-        if len(self._passport_attempts) > self.max_passports_per_hour:
-            logger.warning(f"🚨 [{self.symbol}] HEALTH ALERT: passports_per_hour={len(self._passport_attempts)}")
-
+        
         await self._create_passport(zone, levels, False)
 
     def _get_wall_status(self, zone: GBZone) -> str: return zone.wall_status
@@ -406,150 +526,81 @@ class GoldenBounceStrategy:
             from execution.passport import TradePassport, SignalSource
 
             risk_usd = self.config.get("trading", {}).get("risk", {}).get("base_risk_usdt", 30.0)
-            max_size = self.config.get("trading", {}).get("risk", {}).get("max_position_size", 10.0)
-            min_size = self.config.get("trading", {}).get("risk", {}).get("min_position_size", 0.1)
+            max_notional_usd = self.config.get("trading", {}).get("risk", {}).get("max_notional_usd", 50000.0)
+            min_notional_usd = self.config.get("trading", {}).get("risk", {}).get("min_notional_usd", 100.0)
 
-            risk_per_unit = levels.get("risk_per_unit", 0.0)
-
-            if risk_per_unit <= 0:
-                logger.error(f"🚫 [{self.symbol}] Zero risk_per_unit. Aborting.")
+            entry_price = levels["entry"]
+            risk_per_unit = levels["risk_per_unit"]
+            
+            if risk_per_unit <= 0 or entry_price <= 0:
+                logger.error(f"🚫 [{self.symbol}] Zero risk_per_unit or entry_price. Aborting.")
                 return
 
-            # ✅ v2.1: Идеальный и финальный размер
-            ideal_size = risk_usd / risk_per_unit
-            final_size = max(min_size, min(ideal_size, max_size))
+            fee_per_unit = entry_price * self.fee_rate * 1.5
+            total_risk_per_unit = risk_per_unit + fee_per_unit
 
-            # ✅ v2.2: ФИЛЬТР МИКРОСТОПОВ. Если ideal_size > max*2 — стоп слишком узкий,
-            # риск не управляется нормально (как в сделке SOL 75.55, ideal=145 при cap=10).
-            if ideal_size > (max_size * 2.0):
-                logger.warning(
-                    f"🚫 [{self.symbol}] Отказ: SL слишком узкий. ideal_size ({ideal_size:.2f}) "
-                    f"> max_size * 2 ({max_size * 2:.2f})"
-                )
-                self._log_autopsy("SIGNAL_REJECTED", {
-                    "zone_id": zone.id,
-                    "reason": "sl_too_tight_size_cap",
-                    "ideal_size": round(ideal_size, 2),
-                    "max_size": max_size
-                })
+            if total_risk_per_unit <= 0:
+                logger.error(f"🚫 [{self.symbol}] total_risk_per_unit <= 0. Aborting.")
                 return
 
-            # ✅ v2.1: Реальный риск с учетом комиссий
-            sl_dist_usd = abs(levels["entry"] - levels["sl"])
-            tp2_dist = abs(levels["tp2"] - levels["entry"])
-            rr_ratio = (tp2_dist / sl_dist_usd) if sl_dist_usd > 0 else 0.0
-            notional = levels["entry"] * final_size
-            fees_estimate = notional * self.fee_rate * 2.5
-            actual_risk = (sl_dist_usd * final_size) + fees_estimate
+            ideal_size = risk_usd / total_risk_per_unit
+            ideal_notional = ideal_size * entry_price
+            final_notional = max(min_notional_usd, min(ideal_notional, max_notional_usd))
+            size = final_notional / entry_price
 
+            actual_risk = size * total_risk_per_unit
             risk_limit = risk_usd * self.risk_slippage_mult
+
             if actual_risk > risk_limit:
-                logger.warning(
-                    f"🚫 [{self.symbol}] Отказ от сделки: риск {actual_risk:.2f}$ > лимит {risk_limit:.2f}$ "
-                    f"(ideal={ideal_size:.4f}, final={final_size:.4f}, sl_dist={sl_dist_usd:.2f})"
-                )
-                self._log_autopsy("SIGNAL_REJECTED", {
-                    "zone_id": zone.id,
-                    "reason": "risk_limit_exceeded",
-                    "actual_risk": round(actual_risk, 2),
-                    "risk_limit": round(risk_limit, 2),
-                    "ideal_size": round(ideal_size, 4),
-                    "final_size": round(final_size, 4)
-                })
+                self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "risk_limit_exceeded", "actual_risk": round(actual_risk, 2)})
                 return
 
-            size = final_size
-            logger.info(
-                f"📐 [{self.symbol}] Sizing: ideal={ideal_size:.4f} → final={final_size:.4f} "
-                f"(capped={final_size != ideal_size}, risk=${actual_risk:.2f} / ${risk_usd:.0f})"
-            )
+            logger.info(f"📐 [{self.symbol}] USDT Sizing: risk=${risk_usd:.2f}, notional=${final_notional:.2f} → size={size:.4f}")
 
-            # ✅ v2.1: EV фильтр по TP2
-            actual_risk_usdt = sl_dist_usd * size
-            notional_entry = levels["entry"] * size
-            notional_exit_full = levels["sl"] * size
-            est_commission = (notional_entry + notional_exit_full) * self.fee_rate
-
-            gross_profit_tp2 = size * abs(levels["tp2"] - levels["entry"])
-            required_profit = est_commission * 1.5
-
-            if gross_profit_tp2 < required_profit:
-                logger.warning(
-                    f"🚫 [{self.symbol}] Positive EV Filter failed: "
-                    f"GP_TP2=${gross_profit_tp2:.2f} < Req=${required_profit:.2f}"
-                )
-                self._log_autopsy("SIGNAL_REJECTED", {
-                    "zone_id": zone.id,
-                    "reason": "positive_ev_failed",
-                    "gp_tp2_usd": round(gross_profit_tp2, 2),
-                    "req_usd": round(required_profit, 2),
-                    "est_commission": round(est_commission, 2)
-                })
+            gross_profit_tp2 = size * abs(levels["tp2"] - entry_price)
+            est_commission = final_notional * self.fee_rate * 2
+            if gross_profit_tp2 < (est_commission * 1.5):
+                self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "positive_ev_failed"})
                 return
 
-            # BE-цена: компенсируем комиссии + 3% от риска
-            target_profit_usdt = est_commission + (actual_risk_usdt * 0.03)
-            price_offset = target_profit_usdt / size
-            be_price = levels["entry"] + price_offset if zone.trade_side == "LONG" else levels["entry"] - price_offset
-
-            logger.info(f"🛡️ [{self.symbol}] BE: {be_price:.4f} (Comm: ${est_commission:.2f} + Profit: ${actual_risk_usdt * 0.03:.2f})")
+            # ✅ НОВОЕ: early_BE = 50% пути к TP1 (вместо старого BE)
+            early_be_fraction = self.swing_sl_cfg.get("early_be_fraction", 0.5)
+            tp1_distance = abs(levels["tp1"] - entry_price)
+            be_offset = tp1_distance * early_be_fraction
+            
+            # Проверка: BE должен покрывать комиссии
+            min_be_offset = (est_commission * 1.2) / size if size > 0 else 0
+            if be_offset < min_be_offset:
+                be_offset = min_be_offset
+            
+            be_price = entry_price + be_offset if zone.trade_side == "LONG" else entry_price - be_offset
+            logger.info(f"🛡️ [{self.symbol}] early_BE: {be_price:.4f} (offset={be_offset:.4f}, {early_be_fraction*100:.0f}% to TP1)")
 
             passport = TradePassport(
-                signal_id=zone.id,
-                strategy="GoldenBounce",
-                signal_source=SignalSource.TEST,
-                symbol=self.symbol,
-                side=zone.trade_side,
-                entry_price=levels["entry"],
-                sl_price=levels["sl"],
-                tp1_price=levels["tp1"],
-                tp2_price=levels["tp2"],
-                be_price=be_price,
-                planned_size=size,
-                position_size=size,
-                target_risk_usdt=risk_usd,
-                status="IDLE"
+                signal_id=zone.id, strategy="GoldenBounce", signal_source=SignalSource.TEST,
+                symbol=self.symbol, side=zone.trade_side, entry_price=entry_price,
+                sl_price=levels["sl"], tp1_price=levels["tp1"], tp2_price=levels["tp2"],
+                be_price=be_price, planned_size=size, position_size=size,
+                target_risk_usdt=risk_usd, status="IDLE"
             )
 
-            # ✅ v2.2: Лимит от СТЕНЫ со смещением в нашу пользу.
-            # SHORT: лимит НИЖЕ стены -> исполняется только когда цена затормозила у стены,
-            # а не при пролете сквозь неё (защита от ложного пробоя, как в SOL 75.55).
-            tick_size_map = {
-                "SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01,
-                "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01
-            }
+            tick_size_map = {"SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01, "XRPUSDT": 0.0001}
             tick_size = tick_size_map.get(self.symbol, 0.01)
+            offset_ticks = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("entry_offset_ticks", 1)
 
-            if zone.trade_side == "LONG":
-                limit_price = zone.price * (1.0 + self.pullback_entry_offset_pct)
-            else:
-                limit_price = zone.price * (1.0 - self.pullback_entry_offset_pct)
+            limit_price = zone.price + (tick_size * offset_ticks) if zone.trade_side == "LONG" else zone.price - (tick_size * offset_ticks)
             limit_price = round(limit_price / tick_size) * tick_size
 
-            logger.info(
-                f"📏 [{self.symbol}] Pullback Entry Limit: {limit_price:.4f} "
-                f"(Wall: {zone.price:.4f}, Offset: {self.pullback_entry_offset_pct*100:.2f}%)"
-            )
-
-            logger.info(
-                f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {levels['entry']:.2f} | "
-                f"SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f} | TP2: {levels['tp2']:.2f} | R:R={rr_ratio:.2f}"
-            )
+            rr_ratio = abs(levels["tp2"] - entry_price) / risk_per_unit if risk_per_unit > 0 else 0
+            logger.info(f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {entry_price:.2f} | SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f} | TP2: {levels['tp2']:.2f} | R:R={rr_ratio:.2f}")
 
             self._log_autopsy("SIGNAL_GENERATED", {
-                "zone_id": zone.id,
-                "side": zone.trade_side,
-                "wall_price": zone.price,
-                "limit_price": limit_price,
-                "sl": levels["sl"],
-                "tp1": levels["tp1"],
-                "tp2": levels["tp2"],
-                "risk": levels["risk_per_unit"],
-                "size": size,
-                "be_price": be_price,
-                "cumulative_delta": zone.cumulative_delta,
-                "rr_ratio": round(rr_ratio, 3),
-                "actual_risk_usd": round(actual_risk, 2)
+                "zone_id": zone.id, "side": zone.trade_side, "wall_price": zone.price, "limit_price": limit_price,
+                "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"], "risk_per_unit": risk_per_unit,
+                "size": size, "notional_usd": round(final_notional, 2), "be_price": be_price,
+                "cumulative_delta": zone.cumulative_delta, "rr_ratio": round(rr_ratio, 3), "actual_risk_usd": round(actual_risk, 2),
+                "return_bars": zone.calculate_return_bars(), "return_delta": round(zone.calculate_return_delta(), 2),
+                "swing_sl_enabled": self.swing_sl_cfg.get("enabled", False)
             })
 
             await self.bus.publish("EXEC:NEW_TRADE", passport)
@@ -557,12 +608,7 @@ class GoldenBounceStrategy:
 
             if self.om:
                 try:
-                    await self.om.place_entry_order(
-                        passport,
-                        limit_price=str(limit_price),
-                        timeout_seconds=int(self.entry_order_ttl_sec),
-                        zone_id=zone.id
-                    )
+                    await self.om.place_entry_order(passport, limit_price=str(limit_price), timeout_seconds=int(self.entry_order_ttl_sec), zone_id=zone.id)
                     logger.info(f"✅ [{self.symbol}] Passport handed over to OrderManager successfully.")
                     self._pending_entries[zone.id] = passport
                 except Exception as om_error:
@@ -586,26 +632,17 @@ class GoldenBounceStrategy:
             now = datetime.now(timezone.utc)
             price_f = float(price)
             
-            # ✅ Универсальное получение настроек инструмента
-            instr_cfg = {}
-            if hasattr(self.config, 'get'):
-                instr_cfg = self.config.get("instruments", {}).get(symbol, {})
-            elif isinstance(self.config, dict):
-                instr_cfg = self.config.get("instruments", {}).get(symbol, {})
-                
+            instr_cfg = self.config.get("instruments", {}).get(symbol, {}) if isinstance(self.config, dict) else getattr(self.config, 'get', lambda k, d: {})("instruments", {}).get(symbol, {})
             min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) if instr_cfg else 50000
             
             peak_vol = float(event.get("peak_volume", 0))
             wall_value_usd = price_f * peak_vol
             
             if wall_value_usd < min_wall_usd:
-                logger.info(f"🚫 [{symbol}] Стена отклонена при подтверждении: ценность {wall_value_usd:.0f} USDT < порога {min_wall_usd} USDT (Peak Vol: {peak_vol})")
+                self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "wall_value_too_low", "value": wall_value_usd})
                 return
 
             atr = self._get_current_atr()
-            multipliers = self._get_session_multipliers()
-            k_wall = multipliers.get("k_wall", 2.0)
-
             if self._market_is_dead(now, atr, price_f):
                 self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "dead_market"})
                 return
@@ -613,21 +650,21 @@ class GoldenBounceStrategy:
             radius = max(self.zone_dedup_min_pct * price_f, self.zone_dedup_atr_mult * atr)
             near = self._find_near_zone(price_f, radius)
             if near is not None:
-                near.peak_volume = max(near.peak_volume, float(event.get("peak_volume", 0)))
+                near.peak_volume = max(near.peak_volume, peak_vol)
                 self._log_autopsy("ZONE_REJECTED", {"price": price_f, "reason": "dedup"})
                 return
 
             zone = GBZone(symbol=symbol, price=price_f, side=str(side), created_at=now, atr_at_creation=atr, peak_volume=peak_vol, score_multiplier=1.0)
+            # ✅ Передаём текущую историю баров в новую зону
+            zone.bar_history = self.bar_history
             zone.departure_threshold = zone.calculate_departure_threshold(self.atr_multiplier)
             self.active_zones.append(zone)
 
             self._zone_creations.append(now)
             self._zone_creations = [t for t in self._zone_creations if (now - t).total_seconds() < 3600]
-            if len(self._zone_creations) > self.max_zones_per_hour:
-                logger.warning(f"🚨 [{symbol}] HEALTH ALERT: zones_created_per_hour={len(self._zone_creations)}")
-
-            logger.info(f"✅ [{symbol}] ZONE CREATED: {zone.id} ({zone.trade_side}) @ {price} | Peak Vol: {zone.peak_volume:.0f} | ATR: {atr:.3f}")
-            self._log_autopsy("ZONE_CREATED", {"zone_id": zone.id, "price": price_f, "volume": zone.peak_volume, "side": zone.trade_side, "atr": atr, "k_wall": k_wall})
+            
+            logger.info(f"✅ [{symbol}] ZONE CREATED: {zone.id} ({zone.trade_side}) @ {price} | Peak Vol: {zone.peak_volume:.0f} | ATR: {atr:.3f} | Bars: {len(self.bar_history)}")
+            self._log_autopsy("ZONE_CREATED", {"zone_id": zone.id, "price": price_f, "volume": zone.peak_volume, "side": zone.trade_side, "atr": atr, "bars_available": len(self.bar_history)})
             self._save_active_zones()
 
         elif evt_type == "WALL_PARTIALLY_FILLED":

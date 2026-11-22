@@ -1,16 +1,18 @@
 # Конфигурация платформы PLATO V2
-# Версия: Golden Bounce & Retest (v2.2 Structural Pullback)
+# Версия: Golden Bounce & Retest (v3.3 USDT-Risk Multicoin)
+# Обновлено: инструмент-специфичные фильтры + Swing SL + early_BE
 
 bybit:
   use_testnet: false
-  use_demo: true
+  use_demo: true  # Включаем демо-счет для безопасного тестирования
 
 trading:
   filters:
     positive_ev:
       safety_margin: 1.2
 
-  symbols: ["SOLUSDT", "BTCUSDT", "ETHUSDT", "AVAXUSDT", "LINKUSDT", "BNBUSDT"]
+  # ✅ Изменено: убрали ETHUSDT и LINKUSDT, добавили XRPUSDT
+  symbols: ["SOLUSDT", "BTCUSDT", "AVAXUSDT", "BNBUSDT", "XRPUSDT"]
   category: "linear"
   exit_logic: "structure"
   
@@ -23,15 +25,34 @@ trading:
     post_tp1_logic: "tp2_protect"
     tp2_protection_buffer_mult: 3.0
   
+  # ✅ ЕДИНАЯ ВАЛЮТА РИСКА: USDT
   risk:
-    base_risk_usdt: 30.0
-    max_position_size: 10.0
-    min_position_size: 0.1
-    max_daily_loss: 100.0
+    base_risk_usdt: 30.0         # Ровно 30$ риска на сделку (адаптируется через size)
+    max_notional_usd: 50000.0    # Максимальный размер позиции в USDT
+    min_notional_usd: 100.0      # Минимальный размер позиции в USDT
+    max_daily_loss: 100.0        # Лимит дневных потерь в USDT
+  
+  # ✅ НОВАЯ СЕКЦИЯ: Swing SL параметры (протестировано с PF 2.07)
+  swing_sl:
+    enabled: true
+    swing_n: 5                    # Бары слева/справа для определения Swing
+    swing_window: 48              # Окно поиска Swing (баров)
+    sl_buffer_atr_mult: 0.5       # Буфер от Swing в ATR
+    tp1_mult: 1.0                 # TP1 = 1.0 × SL_distance
+    tp2_mult: 2.0                 # TP2 = 2.0 × SL_distance
+    early_be_fraction: 0.5        # BE = 50% пути к TP1 (early_BE)
+  
+  # ✅ НОВАЯ СЕКЦИЯ: Инструмент-специфичные фильтры возврата
+  instrument_filters:
+    BTCUSDT: { type: return_bars_max, threshold: 6 }   # PF 1.70 на BTC
+    XRPUSDT: { type: delta_agree, threshold: 50 }      # PF 3.52 на XRP
+    SOLUSDT: { type: return_bars_max, threshold: 6 }   # PF 1.35 на SOL
+    BNBUSDT: { type: return_bars_max, threshold: 6 }   # дефолт
+    AVAXUSDT: { type: return_bars_max, threshold: 6 }  # дефолт
   
   orders:
     breakeven_after_tp1: false
-    planned_size: 10.0
+    planned_size: 10.0           # Устарело, теперь управляется через base_risk_usdt
     order_ttl_seconds: 120
 
   strategies:
@@ -40,7 +61,7 @@ trading:
         min_rr_ratio: 1.0
         risk_slippage_mult: 1.2
         fee_rate: 0.0004
-        pullback_entry_offset_pct: 0.0005
+        entry_offset_ticks: 1  
 
       session_multipliers:
         asian_night: { k_wall: 2.5, k_atr_sl_buffer: 1.0, k_atr_retracement: 1.2, k_delta: 0.8 }
@@ -83,32 +104,24 @@ trading:
         pull_cycle_demerit: 0.5
         max_pull_cycles: 3
 
-      entry_offset_ticks: 2
-
+# ✅ Настройки под каждый инструмент (в USDT)
+# Изменено: убрали ETHUSDT и LINKUSDT, добавили XRPUSDT
 instruments:
   SOLUSDT:
     enabled: true
-    min_wall_value_usd: 80000
-    
+    min_wall_value_usd: 150000
   BTCUSDT:
     enabled: true
-    min_wall_value_usd: 200000
-    
-  ETHUSDT:
-    enabled: true
     min_wall_value_usd: 150000
-    
-  LINKUSDT:
+  XRPUSDT:
     enabled: true
-    min_wall_value_usd: 200000
-    
+    min_wall_value_usd: 40000
   BNBUSDT:
     enabled: true
     min_wall_value_usd: 100000
-    
   AVAXUSDT:
     enabled: true
-    min_wall_value_usd: 50000
+    min_wall_value_usd: 70000
 
 self_test:
   enabled: false
