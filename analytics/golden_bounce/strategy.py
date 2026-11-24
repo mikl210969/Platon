@@ -1,7 +1,7 @@
 """
 Golden Bounce Strategy.
-Версия: v3.3. Мультивалютная, USDT-ориентированный риск, Swing SL, early_BE, 
-инструмент-специфичные фильтры.
+Версия: v3.4 (Шаг 1). Мультивалютная, USDT-ориентированный риск, Swing SL, early_BE, 
+инструмент-специфичные фильтры + подготовка к кластерному SL.
 """
 
 import logging
@@ -65,13 +65,14 @@ class GoldenBounceStrategy:
         self.delta_window_sec = 60
         self.delta_short_window_sec = 15
 
-        # ✅ НОВОЕ: История баров для Swing SL (общая для всех зон символа)
         self.bar_history: List[Dict] = []
         self._current_bar_time_ms: int = 0
         
-        # ✅ НОВОЕ: Конфиг Swing SL и фильтров
         self.swing_sl_cfg = self.config.get("trading", {}).get("swing_sl", {})
         self.instrument_filters = self.config.get("trading", {}).get("instrument_filters", {})
+
+        # ✅ ШАГ 1: Хранилище для последнего снапшота стакана
+        self._latest_ob_snapshot: Optional[Dict[str, Any]] = None
 
         health = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("health", {})
         self.min_atr_bps = float(health.get("min_atr_bps", 20))
@@ -107,7 +108,7 @@ class GoldenBounceStrategy:
         self.bus.subscribe(f"PUBLIC:ORDERBOOK:{symbol}", self._on_orderbook)
         self.bus.subscribe("ORDER:TIMER_CANCELLED", self._on_timer_cancelled)
 
-        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (v3.3 USDT-Risk + Swing SL + early_BE)")
+        logger.info(f"✨ [{self.symbol}] GoldenBounceStrategy initialized (v3.4 Cluster SL + Opposite Cluster Check)")
 
     def _get_current_session(self) -> str:
         hour = datetime.now(timezone.utc).hour
@@ -205,15 +206,12 @@ class GoldenBounceStrategy:
         except Exception as e: logger.error(f"Ошибка записи active_zones: {e}")
 
     def _update_bar_history(self, ts_ms: int, price: float):
-        """✅ НОВОЕ: Обновляет историю баров для Swing SL."""
         if price <= 0 or ts_ms <= 0:
             return
         
-        # Floor до 5-минутной свечи (300 000 мс)
         bar_time_ms = (ts_ms // 300000) * 300000
         
         if not self.bar_history or self.bar_history[-1]["time"] < bar_time_ms:
-            # Новая свеча
             self.bar_history.append({
                 "time": bar_time_ms,
                 "open": price,
@@ -223,17 +221,14 @@ class GoldenBounceStrategy:
             })
             self._current_bar_time_ms = bar_time_ms
         else:
-            # Обновляем текущую свечу
             last = self.bar_history[-1]
             last["high"] = max(last["high"], price)
             last["low"] = min(last["low"], price)
             last["close"] = price
         
-        # Ограничиваем историю 200 барами
         if len(self.bar_history) > 200:
             self.bar_history = self.bar_history[-200:]
         
-        # Обновляем bar_history во всех активных зонах
         for zone in self.active_zones:
             if zone.status != ZoneStatus.INVALIDATED:
                 zone.bar_history = self.bar_history
@@ -256,7 +251,6 @@ class GoldenBounceStrategy:
                 elif side == "Sell": signed_delta = -qty
                 else: continue
 
-                # ✅ Обновляем историю баров
                 self._update_bar_history(ts_ms, price)
 
                 self.delta_buffer.append((trade_ts, signed_delta))
@@ -279,6 +273,9 @@ class GoldenBounceStrategy:
 
     async def _on_orderbook(self, snapshot: Dict[str, Any]):
         try:
+            # ✅ ШАГ 1: Сохраняем последний пришедший снапшот стакана
+            self._latest_ob_snapshot = snapshot
+            
             now = datetime.now(timezone.utc)
             data = snapshot.get("data", {})
             bids = data.get("b", [])
@@ -349,10 +346,9 @@ class GoldenBounceStrategy:
         self._save_active_zones()
 
     def _check_instrument_filter(self, zone: GBZone) -> bool:
-        """✅ НОВОЕ: Проверяет инструмент-специфичный фильтр возврата."""
         instr_filter = self.instrument_filters.get(self.symbol)
         if not instr_filter:
-            return True  # Нет фильтра — пропускаем
+            return True
         
         filter_type = instr_filter.get("type")
         threshold = instr_filter.get("threshold", 0)
@@ -360,18 +356,12 @@ class GoldenBounceStrategy:
         if filter_type == "return_bars_max":
             return_bars = zone.calculate_return_bars()
             if return_bars is None:
-                self._log_autopsy("SIGNAL_REJECTED", {
-                    "zone_id": zone.id,
-                    "reason": "return_bars_unknown"
-                })
+                self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "return_bars_unknown"})
                 return False
             if return_bars > threshold:
                 self._log_autopsy("SIGNAL_REJECTED", {
-                    "zone_id": zone.id,
-                    "reason": "return_bars_filter",
-                    "return_bars": return_bars,
-                    "threshold": threshold,
-                    "filter": f"{self.symbol}:{filter_type}"
+                    "zone_id": zone.id, "reason": "return_bars_filter", "return_bars": return_bars,
+                    "threshold": threshold, "filter": f"{self.symbol}:{filter_type}"
                 })
                 logger.info(f"⏱️ [{self.symbol}] RETURN_BARS FILTER: {return_bars} > {threshold}, reject")
                 return False
@@ -381,28 +371,18 @@ class GoldenBounceStrategy:
         elif filter_type == "delta_agree":
             return_delta = zone.calculate_return_delta()
             if zone.trade_side == "LONG":
-                # LONG: возврат должен быть с покупками (положительная дельта)
                 if return_delta <= threshold:
                     self._log_autopsy("SIGNAL_REJECTED", {
-                        "zone_id": zone.id,
-                        "reason": "delta_agree_filter",
-                        "return_delta": return_delta,
-                        "threshold": threshold,
-                        "side": "LONG",
-                        "filter": f"{self.symbol}:{filter_type}"
+                        "zone_id": zone.id, "reason": "delta_agree_filter", "return_delta": return_delta,
+                        "threshold": threshold, "side": "LONG", "filter": f"{self.symbol}:{filter_type}"
                     })
                     logger.info(f"📉 [{self.symbol}] DELTA_AGREE FILTER (LONG): delta={return_delta:.2f} <= {threshold}, reject")
                     return False
             else:
-                # SHORT: возврат должен быть с продажами (отрицательная дельта)
                 if return_delta >= -threshold:
                     self._log_autopsy("SIGNAL_REJECTED", {
-                        "zone_id": zone.id,
-                        "reason": "delta_agree_filter",
-                        "return_delta": return_delta,
-                        "threshold": threshold,
-                        "side": "SHORT",
-                        "filter": f"{self.symbol}:{filter_type}"
+                        "zone_id": zone.id, "reason": "delta_agree_filter", "return_delta": return_delta,
+                        "threshold": threshold, "side": "SHORT", "filter": f"{self.symbol}:{filter_type}"
                     })
                     logger.info(f"📈 [{self.symbol}] DELTA_AGREE FILTER (SHORT): delta={return_delta:.2f} >= {-threshold}, reject")
                     return False
@@ -434,13 +414,9 @@ class GoldenBounceStrategy:
             await self._invalidate_zone(zone, "WALL_GONE" if wall_status == "GONE" else "WALL_CONSUMED")
             return
 
-        # ✅ НОВОЕ: Инструмент-специфичный фильтр возврата
         if not self._check_instrument_filter(zone):
             return
 
-        # ========================================================================
-        # ФИЛЬТР: АСИММЕТРИЯ ДЕЛЬТЫ (Delta Asymmetry Ratio - DAR)
-        # ========================================================================
         current_atr = self._get_current_atr()
         if current_atr <= 0: current_atr = 0.5
         
@@ -475,9 +451,12 @@ class GoldenBounceStrategy:
             logger.info(f"🎯 [{self.symbol}] Zone {zone.id} ИДЕАЛЬНЫЙ РЕТЕСТ: delta_return={delta_return:.1f}")
             
         logger.info(f"✅ [{self.symbol}] Zone {zone.id} ФИЛЬТР ДЕЛЬТЫ ПРОЙДЕН: bounce={delta_bounce:.1f}, return={delta_return:.1f}, DAR={ratio:.2f}")
-        # ========================================================================
 
-        # 1. Получаем базовые уровни от зоны
+        if self._latest_ob_snapshot:
+            zone.set_orderbook_snapshot(self._latest_ob_snapshot)
+        else:
+            logger.warning(f"⚠️ [{self.symbol}] Нет актуального снапшота стакана для зоны {zone.id}. Кластерный SL будет недоступен.")
+
         tick_size_map = {"SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01, "XRPUSDT": 0.0001}
         tick_size = tick_size_map.get(self.symbol, 0.01)
         offset_ticks = self.config.get("trading", {}).get("strategies", {}).get("golden_bounce", {}).get("entry_offset_ticks", 1)
@@ -487,17 +466,38 @@ class GoldenBounceStrategy:
         else:
             entry_price = zone.price - (tick_size * offset_ticks)
 
-        # ✅ НОВОЕ: Swing SL + передаём bar_history в зону
+        # ✅ ШАГ 2: Попытка найти кластерный SL
+        cluster_cfg = self.config.get("trading", {}).get("cluster_search", {})
+        instr_cfg = self.config.get("instruments", {}).get(self.symbol, {})
+        cluster_cfg["min_cluster_volume_usd"] = instr_cfg.get("min_cluster_volume_usd", 20000)
+        
+        cluster_boundary_price = zone.find_cluster_boundary(tick_size, cluster_cfg)
+        
         zone.bar_history = self.bar_history
+        
+        # ✅ ШАГ 3: Передаём найденную границу и конфиг кластерного SL в расчёт уровней
+        cluster_sl_cfg = self.config.get("trading", {}).get("cluster_sl", {})
+        
         levels = zone.calculate_sl_tp(
             entry_price, 
             self.sl_buffer_pct, 
             self.tp1_fraction,
             swing_sl_cfg=self.swing_sl_cfg,
-            atr=current_atr
+            atr=current_atr,
+            cluster_boundary_price=cluster_boundary_price,
+            tick_size=tick_size,
+            cluster_sl_cfg=cluster_sl_cfg,
+            cluster_search_cfg=cluster_cfg
         )
         if levels is None:
-            self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "invalid_risk"})
+            # ✅ ШАГ 7: используем точную причину отклонения из зоны
+            rejection_reason = getattr(zone, "last_rejection_reason", None) or "invalid_risk"
+            self._log_autopsy("SIGNAL_REJECTED", {
+                "zone_id": zone.id,
+                "reason": rejection_reason,
+                "sl_source_attempted": "cluster" if cluster_boundary_price else "swing"
+            })
+            zone.last_rejection_reason = None  # сброс
             return
 
         sl_dist = abs(levels["entry"] - levels["sl"])
@@ -531,7 +531,7 @@ class GoldenBounceStrategy:
 
             entry_price = levels["entry"]
             risk_per_unit = levels["risk_per_unit"]
-            
+
             if risk_per_unit <= 0 or entry_price <= 0:
                 logger.error(f"🚫 [{self.symbol}] Zero risk_per_unit or entry_price. Aborting.")
                 return
@@ -563,16 +563,14 @@ class GoldenBounceStrategy:
                 self._log_autopsy("SIGNAL_REJECTED", {"zone_id": zone.id, "reason": "positive_ev_failed"})
                 return
 
-            # ✅ НОВОЕ: early_BE = 50% пути к TP1 (вместо старого BE)
             early_be_fraction = self.swing_sl_cfg.get("early_be_fraction", 0.5)
             tp1_distance = abs(levels["tp1"] - entry_price)
             be_offset = tp1_distance * early_be_fraction
-            
-            # Проверка: BE должен покрывать комиссии
+
             min_be_offset = (est_commission * 1.2) / size if size > 0 else 0
             if be_offset < min_be_offset:
                 be_offset = min_be_offset
-            
+
             be_price = entry_price + be_offset if zone.trade_side == "LONG" else entry_price - be_offset
             logger.info(f"🛡️ [{self.symbol}] early_BE: {be_price:.4f} (offset={be_offset:.4f}, {early_be_fraction*100:.0f}% to TP1)")
 
@@ -594,14 +592,23 @@ class GoldenBounceStrategy:
             rr_ratio = abs(levels["tp2"] - entry_price) / risk_per_unit if risk_per_unit > 0 else 0
             logger.info(f"🎯 [{self.symbol}] SIGNAL GENERATED: {zone.id} | {zone.trade_side} @ {entry_price:.2f} | SL: {levels['sl']:.2f} | TP1: {levels['tp1']:.2f} | TP2: {levels['tp2']:.2f} | R:R={rr_ratio:.2f}")
 
-            self._log_autopsy("SIGNAL_GENERATED", {
+            # ✅ ШАГ 7: расширенная телеметрия по кластерному SL и встречному кластеру
+            autopsy_record = {
                 "zone_id": zone.id, "side": zone.trade_side, "wall_price": zone.price, "limit_price": limit_price,
                 "sl": levels["sl"], "tp1": levels["tp1"], "tp2": levels["tp2"], "risk_per_unit": risk_per_unit,
                 "size": size, "notional_usd": round(final_notional, 2), "be_price": be_price,
                 "cumulative_delta": zone.cumulative_delta, "rr_ratio": round(rr_ratio, 3), "actual_risk_usd": round(actual_risk, 2),
                 "return_bars": zone.calculate_return_bars(), "return_delta": round(zone.calculate_return_delta(), 2),
-                "swing_sl_enabled": self.swing_sl_cfg.get("enabled", False)
-            })
+                "swing_sl_enabled": self.swing_sl_cfg.get("enabled", False),
+                # Кластерная телеметрия
+                "sl_source": levels.get("sl_source", "unknown"),
+                "cluster_sl_shadow": levels.get("cluster_sl_shadow"),
+                "cluster_boundary_price": levels.get("cluster_boundary_price"),
+                "opposite_cluster_found": levels.get("opposite_cluster_found", False),
+                "opposite_cluster_price": levels.get("opposite_cluster_price"),
+                "tp2_shifted": levels.get("tp2_shifted", False),
+            }
+            self._log_autopsy("SIGNAL_GENERATED", autopsy_record)
 
             await self.bus.publish("EXEC:NEW_TRADE", passport)
             logger.info(f"📋 [{self.symbol}] Passport registered in PositionMonitor (EXEC:NEW_TRADE)")
@@ -655,7 +662,6 @@ class GoldenBounceStrategy:
                 return
 
             zone = GBZone(symbol=symbol, price=price_f, side=str(side), created_at=now, atr_at_creation=atr, peak_volume=peak_vol, score_multiplier=1.0)
-            # ✅ Передаём текущую историю баров в новую зону
             zone.bar_history = self.bar_history
             zone.departure_threshold = zone.calculate_departure_threshold(self.atr_multiplier)
             self.active_zones.append(zone)

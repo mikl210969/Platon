@@ -1,6 +1,6 @@
 # Конфигурация платформы PLATO V2
-# Версия: Golden Bounce & Retest (v3.3 USDT-Risk Multicoin)
-# Обновлено: инструмент-специфичные фильтры + Swing SL + early_BE
+# Версия: Golden Bounce & Retest (v3.4 Cluster SL Shadow Mode)
+# Обновлено: инструмент-специфичные фильтры + Swing SL + early_BE + кластерный SL (shadow)
 
 bybit:
   use_testnet: false
@@ -32,7 +32,7 @@ trading:
     min_notional_usd: 100.0      # Минимальный размер позиции в USDT
     max_daily_loss: 100.0        # Лимит дневных потерь в USDT
   
-  # ✅ НОВАЯ СЕКЦИЯ: Swing SL параметры (протестировано с PF 2.07)
+  # ✅ Swing SL параметры (протестировано с PF 2.07)
   swing_sl:
     enabled: true
     swing_n: 5                    # Бары слева/справа для определения Swing
@@ -42,7 +42,30 @@ trading:
     tp2_mult: 2.0                 # TP2 = 2.0 × SL_distance
     early_be_fraction: 0.5        # BE = 50% пути к TP1 (early_BE)
   
-  # ✅ НОВАЯ СЕКЦИЯ: Инструмент-специфичные фильтры возврата
+  # ✅ НОВАЯ СЕКЦИЯ: Кластерный SL (v3.4, shadow-режим)
+  cluster_search:
+    enabled: true
+    k_median: 4                   # Размер окна для медианы объёмов
+    break_coefficient: 3.0        # Коэффициент разрыва относительно медианы
+    quick_signal_coefficient: 2.0 # Коэффициент быстрого сигнала (относительно соседа)
+    min_liquid_levels: 3          # Минимум жидких уровней для подтверждения разрыва
+    min_liquid_width_ticks: 5     # Минимальная ширина жидкой зоны в тиках
+    max_liquid_volume_pct: 0.10   # Максимальный объём жидкой зоны (% от кластера)
+    max_depth_atr_mult: 0.3       # Потолок сканирования в ATR
+    max_depth_price_pct: 0.0005   # Потолок сканирования в % от цены
+
+  cluster_sl:
+    enabled: true               # ← МЕНЯЕМ НА TRUE (Боевой режим)
+    buffer_atr_mult: 0.1
+    buffer_min_ticks: 3
+    buffer_cold_start_ticks: 5
+    max_distance_atr_mult: 2.0
+    use_hvn_validation: true
+    hvn_max_age_sec: 1800
+    hvn_match_tolerance_ticks: 10
+    tp_buffer_ticks: 3
+
+  # ✅ Инструмент-специфичные фильтры возврата
   instrument_filters:
     BTCUSDT: { type: return_bars_max, threshold: 6 }   # PF 1.70 на BTC
     XRPUSDT: { type: delta_agree, threshold: 50 }      # PF 3.52 на XRP
@@ -105,23 +128,28 @@ trading:
         max_pull_cycles: 3
 
 # ✅ Настройки под каждый инструмент (в USDT)
-# Изменено: убрали ETHUSDT и LINKUSDT, добавили XRPUSDT
+# Изменено: убрали ETHUSDT и LINKUSDT, добавили XRPUSDT + min_cluster_volume_usd
 instruments:
   SOLUSDT:
     enabled: true
     min_wall_value_usd: 150000
+    min_cluster_volume_usd: 20000
   BTCUSDT:
     enabled: true
     min_wall_value_usd: 150000
+    min_cluster_volume_usd: 50000
   XRPUSDT:
     enabled: true
     min_wall_value_usd: 40000
+    min_cluster_volume_usd: 10000
   BNBUSDT:
     enabled: true
     min_wall_value_usd: 100000
+    min_cluster_volume_usd: 20000
   AVAXUSDT:
     enabled: true
     min_wall_value_usd: 70000
+    min_cluster_volume_usd: 10000
 
 self_test:
   enabled: false
