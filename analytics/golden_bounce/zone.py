@@ -235,24 +235,11 @@ class GBZone:
     def find_cluster_boundary(self, tick_size: float, cfg: Optional[dict] = None,
                               start_price: Optional[float] = None,
                               scan_side: Optional[str] = None) -> Optional[float]:
-        """
-        Находит границу кластера ликвидности в стакане.
-
-        Параметры:
-            tick_size: шаг цены инструмента
-            cfg: конфиг кластерного поиска (cluster_search + min_cluster_volume_usd)
-            start_price: цена, от которой начинаем сканировать.
-                         Если None — используется self.price (стена).
-            scan_side: 'bid' или 'ask' — какую сторону стакана сканировать.
-                       Если None — используется self.side (своя сторона, для SL).
-
-        Возвращает цену границы кластера или None.
-        """
-
-        # ✅ ОТЛАДКА: логируем каждый вызов
+        # ✅ ОТЛАДКА 1: общий вызов
         logger.info(f"🔎 [{self.symbol}] find_cluster_boundary вызван: side={self.side}, snapshot={'есть' if self.orderbook_snapshot else 'НЕТ'}, start={start_price}, scan={scan_side}")
         
         if not self.orderbook_snapshot:
+            logger.info(f"⚠️ [{self.symbol}] find_cluster_boundary прерван: snapshot пустой")
             return None
 
         if cfg is None:
@@ -266,9 +253,14 @@ class GBZone:
         min_cluster_volume_usd = cfg.get("min_cluster_volume_usd", 20000)
 
         data = self.orderbook_snapshot.get("data", {})
-        levels = data.get(scan_side if scan_side else self.side, [])
-
+        side_key = scan_side if scan_side else self.side
+        levels = data.get(side_key, [])
+        
+        # ✅ ОТЛАДКА 2: проверяем, извлеклись ли уровни
+        logger.info(f"🔍 [{self.symbol}] find_cluster_boundary: ищем в ключе '{side_key}', найдено уровней: {len(levels)}")
+        
         if not levels:
+            logger.info(f"⚠️ [{self.symbol}] find_cluster_boundary прерван: уровней нет в ключе '{side_key}'. Доступные ключи: {list(data.keys())}")
             return None
 
         parsed_levels = [(float(p), float(v)) for p, v in levels]
