@@ -248,6 +248,10 @@ class GBZone:
 
         Возвращает цену границы кластера или None.
         """
+
+        # ✅ ОТЛАДКА: логируем каждый вызов
+        logger.info(f"🔎 [{self.symbol}] find_cluster_boundary вызван: side={self.side}, snapshot={'есть' if self.orderbook_snapshot else 'НЕТ'}, start={start_price}, scan={scan_side}")
+        
         if not self.orderbook_snapshot:
             return None
 
@@ -343,6 +347,7 @@ class GBZone:
                     else:
                         return None
 
+        logger.info(f"⚠️ [{self.symbol}] find_cluster_boundary вернул None: просканировано {len(parsed_levels)} уровней, cluster_vol=${cluster_volume_usd:.0f}")
         return None
 
     def _check_opposite_cluster(self, entry_price: float, tp1: float, tp2: float,
