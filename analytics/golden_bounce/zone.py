@@ -253,7 +253,9 @@ class GBZone:
         min_cluster_volume_usd = cfg.get("min_cluster_volume_usd", 20000)
 
         data = self.orderbook_snapshot.get("data", {})
-        side_key = scan_side if scan_side else self.side
+        # Маппинг ключей стакана Bybit: 'ask' -> 'a', 'bid' -> 'b'
+        side_key_raw = scan_side if scan_side else self.side
+        side_key = 'a' if side_key_raw == 'ask' else 'b'
         levels = data.get(side_key, [])
         
         # ✅ ОТЛАДКА 2: проверяем, извлеклись ли уровни
