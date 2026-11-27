@@ -273,11 +273,29 @@ class GoldenBounceStrategy:
 
     async def _on_orderbook(self, snapshot: Dict[str, Any]):
         try:
-            # ✅ ШАГ 1: Сохраняем последний пришедший снапшот стакана
-            self._latest_ob_snapshot = snapshot
+            # ✅ РАЗЛИЧАЕМ snapshot и delta от Bybit WebSocket
+            msg_type = snapshot.get("type", "delta")
+            
+            if msg_type == "snapshot":
+                # Полный снапшот — сохраняем целиком
+                self._latest_ob_snapshot = snapshot
+            else:
+                # Дельта-обновление — обновляем уровни в существующем снапшоте
+                if self._latest_ob_snapshot is None:
+                    self._latest_ob_snapshot = snapshot
+                else:
+                    # Bybit в дельте присылает ПОЛНЫЙ срез измененной стороны,
+                    # поэтому просто заменяем ключи a/b
+                    data = snapshot.get("data", {})
+                    existing_data = self._latest_ob_snapshot.get("data", {})
+                    
+                    if "a" in data:
+                        existing_data["a"] = data["a"]
+                    if "b" in data:
+                        existing_data["b"] = data["b"]
             
             now = datetime.now(timezone.utc)
-            data = snapshot.get("data", {})
+            data = self._latest_ob_snapshot.get("data", {})
             bids = data.get("b", [])
             asks = data.get("a", [])
 
@@ -327,13 +345,17 @@ class GoldenBounceStrategy:
             elif zone.status == ZoneStatus.DEPARTED:
                 if zone.is_return_expired(now):
                     await self._invalidate_zone(zone, "RETURN_TIMEOUT")
-                elif zone.check_return(current_price):
-                    return_bars = zone.calculate_return_bars()
-                    return_delta = zone.calculate_return_delta()
-                    logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | "
-                              f"return_bars={return_bars} | return_delta={return_delta:.2f} | CumDelta: {zone.cumulative_delta:.2f}")
-                    await self._evaluate_signal(zone, current_price)
-                    zone.status = ZoneStatus.SIGNAL_READY
+                else:
+                    # ✅ Передаем tick_size для расчета адаптивного коридора
+                    tick_size_map = {"SOLUSDT": 0.01, "BTCUSDT": 0.1, "ETHUSDT": 0.01, "LINKUSDT": 0.001, "BNBUSDT": 0.1, "AVAXUSDT": 0.01, "XRPUSDT": 0.0001}
+                    tick_size = tick_size_map.get(self.symbol, 0.01)
+                    
+                    if zone.check_return(current_price, tick_size):
+                        return_bars = zone.calculate_return_bars()
+                        logger.info(f"🔄 [{self.symbol}] ZONE RETURNING: {zone.id} ({zone.trade_side}) @ {zone.price} | "
+                                  f"return_bars={return_bars} | CumDelta: {zone.cumulative_delta:.2f}")
+                        await self._evaluate_signal(zone, current_price)
+                        zone.status = ZoneStatus.SIGNAL_READY
 
         self.active_zones = [z for z in self.active_zones if z.status != ZoneStatus.INVALIDATED]
 

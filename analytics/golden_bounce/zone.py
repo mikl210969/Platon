@@ -46,8 +46,6 @@ class GBZone:
     high_price: Optional[float] = None
     departure_confirmed_at: Optional[datetime] = None
 
-    return_confirmed_at: Optional[datetime] = None
-
     delta_recent: float = 0.0
     delta_pullback: float = 0.0
     delta_z_score: float = 0.0
@@ -55,6 +53,7 @@ class GBZone:
     absorption_score: float = 0.0
     cumulative_delta: float = 0.0
     delta_bounce_snapshot: float = 0.0
+    wall_touch_time: Optional[datetime] = None  # ✅ ШАГ 4: время фактического касания стены
 
     ttl_seconds: float = 172800.0
     return_ttl_seconds: float = 3600.0
@@ -155,44 +154,55 @@ class GBZone:
             elapsed = (datetime.now(timezone.utc) - self.bounce_start_time).total_seconds()
             if elapsed >= 600:
                 self.bounce_confirmed = True
-
+        
         if current_distance >= actual_required and self.bounce_confirmed:
             self.departure_threshold = current_price
             self.status = ZoneStatus.DEPARTED
             self.departure_confirmed_at = datetime.now(timezone.utc)
             self.high_price = self.price
-            logger.info(f"✅ [{self.symbol}] ZONE {self.id} DEPARTED: price={self.price:.2f}, extreme={self.extreme_price:.2f}, dist={current_distance:.2f}, bounce_time={elapsed:.0f}s")
+            # ✅ ШАГ 1: Фиксируем дельту именно в момент подтверждения отскока
+            self.delta_bounce_snapshot = self.cumulative_delta 
+            logger.info(f"✅ [{self.symbol}] ZONE {self.id} DEPARTED: price={self.price:.2f}, extreme={self.extreme_price:.2f}, dist={current_distance:.2f}, bounce_time={elapsed:.0f}s, delta_snapshot={self.delta_bounce_snapshot:.2f}")
             return True
 
         return False
 
-    def check_return(self, current_price: float) -> bool:
+    def check_return(self, current_price: float, tick_size: float = 0.01) -> bool:
+        """Проверяет возврат. Коридор на основе ATR. Фиксирует время касания стены."""
         if self.status != ZoneStatus.DEPARTED or self.high_price is None:
             return False
 
         now = datetime.now(timezone.utc)
-        if self._last_return_check and (now - self._last_return_check).total_seconds() < 5:
+        if self._last_return_check and (now - self._last_return_check).total_seconds() < 2: # Уменьшили троттлинг до 2 сек
             return False
         self._last_return_check = now
 
-        return_tolerance = self.high_price * 0.001
+        # ✅ ШАГ 2: Адаптивный коридор (5% от ATR, но не меньше 10 тиков)
+        atr_tolerance = self.atr_at_creation * 0.05
+        min_tolerance = tick_size * 10
+        return_tolerance = max(atr_tolerance, min_tolerance)
 
-        if self.side == "bid":
-            if (self.high_price - return_tolerance) <= current_price <= (self.high_price + return_tolerance):
-                self.status = ZoneStatus.RETURNING
-                self.delta_bounce_snapshot = self.cumulative_delta
-                self.return_confirmed_at = now
-                logger.info(f"🔄 [{self.symbol}] ZONE {self.id} RETURNING: price={current_price:.2f}, wall={self.high_price:.2f}, delta_snapshot={self.delta_bounce_snapshot:.2f}")
-                return True
-        else:
-            if (self.high_price - return_tolerance) <= current_price <= (self.high_price + return_tolerance):
-                self.status = ZoneStatus.RETURNING
-                self.delta_bounce_snapshot = self.cumulative_delta
-                self.return_confirmed_at = now
-                logger.info(f"🔄 [{self.symbol}] ZONE {self.id} RETURNING: price={current_price:.2f}, wall={self.high_price:.2f}, delta_snapshot={self.delta_bounce_snapshot:.2f}")
-                return True
+        # ✅ ШАГ 4: Фиксируем время фактического касания стены (в пределах 1 тика)
+        if abs(current_price - self.high_price) <= tick_size:
+            if self.wall_touch_time is None:
+                self.wall_touch_time = now
+
+        in_corridor = (self.high_price - return_tolerance) <= current_price <= (self.high_price + return_tolerance)
+
+        if in_corridor:
+            self.status = ZoneStatus.RETURNING
+            # Снапшот дельты уже зафиксирован в check_departure, здесь ничего не меняем
+            logger.info(f"🔄 [{self.symbol}] ZONE {self.id} RETURNING: price={current_price:.2f}, wall={self.high_price:.2f}, corridor={return_tolerance:.4f}, touch_time={self.wall_touch_time}")
+            return True
 
         return False
+
+    def calculate_return_bars(self) -> Optional[int]:
+        """Считает бары возврата от момента фактического касания стены, а не от входа в коридор."""
+        if self.wall_touch_time is None or self.departure_confirmed_at is None:
+            return None
+        seconds = (self.wall_touch_time - self.departure_confirmed_at).total_seconds()
+        return int(seconds / 300)  # 5-минутные бары    
 
     def update_cumulative_delta(self, signed_delta: float):
         self.cumulative_delta += signed_delta
@@ -217,12 +227,6 @@ class GBZone:
             return False
         now = now or datetime.now(timezone.utc)
         return (now - self.departure_confirmed_at).total_seconds() > self.return_ttl_seconds
-
-    def calculate_return_bars(self) -> Optional[int]:
-        if self.departure_confirmed_at is None or self.return_confirmed_at is None:
-            return None
-        elapsed_sec = (self.return_confirmed_at - self.departure_confirmed_at).total_seconds()
-        return int(elapsed_sec / 300)
 
     def calculate_return_delta(self) -> float:
         return self.cumulative_delta - self.delta_bounce_snapshot
