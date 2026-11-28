@@ -273,31 +273,71 @@ class GoldenBounceStrategy:
 
     async def _on_orderbook(self, snapshot: Dict[str, Any]):
         try:
-            # ✅ ИСПРАВЛЕНИЕ: используем только snapshot, игнорируем delta
-            # Delta содержит только измененные уровни (1-2 штуки),
-            # и при замене ломает полный стакан.
+            # ✅ Bybit orderbook.200: первое сообщение type=snapshot (200 уровней),
+            # далее type=delta (только изменённые уровни). Дельту нужно МЕРДЖИТЬ,
+            # а не заменять весь стакан — иначе остаётся 1-2 уровня.
             msg_type = snapshot.get("type", "delta")
-            
-            if msg_type != "snapshot":
-                return  # Игнорируем дельты
-            
-            # Сохраняем полный снапшот
-            self._latest_ob_snapshot = snapshot
-            
+
+            if msg_type == "snapshot" or self._latest_ob_snapshot is None:
+                # Полный снапшот — сохраняем целиком (глубокая копия не нужна,
+                # т.к. дальше мы мутируем только свой словарь)
+                self._latest_ob_snapshot = {
+                    "topic": snapshot.get("topic"),
+                    "type": "snapshot",
+                    "ts": snapshot.get("ts"),
+                    "data": {
+                        "s": snapshot.get("data", {}).get("s", self.symbol),
+                        "b": list(snapshot.get("data", {}).get("b", [])),
+                        "a": list(snapshot.get("data", {}).get("a", [])),
+                        "u": snapshot.get("data", {}).get("u"),
+                        "seq": snapshot.get("data", {}).get("seq"),
+                    }
+                }
+            else:
+                # Дельта — обновляем уровни по цене
+                delta_data = snapshot.get("data", {})
+                book = self._latest_ob_snapshot.setdefault("data", {})
+
+                for side in ("b", "a"):
+                    if side not in delta_data:
+                        continue
+
+                    # Словарь цена -> объём (ключи строковые, как у Bybit)
+                    levels_map = {str(p): str(v) for p, v in book.get(side, [])}
+
+                    for price, vol in delta_data[side]:
+                        p_key = str(price)
+                        if float(vol) == 0.0:
+                            levels_map.pop(p_key, None)   # уровень удалён биржей
+                        else:
+                            levels_map[p_key] = str(vol)  # уровень обновлён/добавлен
+
+                    # Собираем обратно список и сортируем
+                    updated = [[p, v] for p, v in levels_map.items()]
+                    updated.sort(key=lambda x: float(x[0]), reverse=(side == "b"))
+                    book[side] = updated
+
+                # Обновляем служебные поля
+                if "u" in delta_data:
+                    book["u"] = delta_data["u"]
+                if "seq" in delta_data:
+                    book["seq"] = delta_data["seq"]
+                self._latest_ob_snapshot["ts"] = snapshot.get("ts")
+
             now = datetime.now(timezone.utc)
-            data = snapshot.get("data", {})
+            data = self._latest_ob_snapshot.get("data", {})
             bids = data.get("b", [])
             asks = data.get("a", [])
 
             current_price = None
-            if bids and asks: 
+            if bids and asks:
                 current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
-            elif bids: 
+            elif bids:
                 current_price = float(bids[0][0])
-            elif asks: 
+            elif asks:
                 current_price = float(asks[0][0])
 
-            if current_price is not None: 
+            if current_price is not None:
                 await self._check_zones_departure(current_price, now)
 
             instr_cfg = self.config.get("instruments", {}).get(self.symbol, {})
@@ -307,15 +347,15 @@ class GoldenBounceStrategy:
                 best_bid_price, best_bid_vol = float(bids[0][0]), float(bids[0][1])
                 if best_bid_price * best_bid_vol >= min_wall_usd:
                     event = await self.wall_tracker.update_ob(self.symbol, best_bid_price, best_bid_vol, "bid", now)
-                    if event: 
+                    if event:
                         await self._handle_wall_event(event)
             if asks:
                 best_ask_price, best_ask_vol = float(asks[0][0]), float(asks[0][1])
                 if best_ask_price * best_ask_vol >= min_wall_usd:
                     event = await self.wall_tracker.update_ob(self.symbol, best_ask_price, best_ask_vol, "ask", now)
-                    if event: 
+                    if event:
                         await self._handle_wall_event(event)
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"[{self.symbol}] Error in _on_orderbook: {e}", exc_info=True)
 
     async def _check_zones_departure(self, current_price: float, now: datetime):
