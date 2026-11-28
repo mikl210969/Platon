@@ -173,7 +173,7 @@ class GBZone:
             return False
 
         now = datetime.now(timezone.utc)
-        if self._last_return_check and (now - self._last_return_check).total_seconds() < 2: # Уменьшили троттлинг до 2 сек
+        if self._last_return_check and (now - self._last_return_check).total_seconds() < 2:
             return False
         self._last_return_check = now
 
@@ -182,16 +182,14 @@ class GBZone:
         min_tolerance = tick_size * 10
         return_tolerance = max(atr_tolerance, min_tolerance)
 
-        # ✅ ШАГ 4: Фиксируем время фактического касания стены (в пределах 1 тика)
-        if abs(current_price - self.high_price) <= tick_size:
-            if self.wall_touch_time is None:
-                self.wall_touch_time = now
-
         in_corridor = (self.high_price - return_tolerance) <= current_price <= (self.high_price + return_tolerance)
 
         if in_corridor:
+            # ✅ ИСПРАВЛЕНИЕ: фиксируем время входа в коридор (а не касания стены)
+            if self.wall_touch_time is None:
+                self.wall_touch_time = now
+
             self.status = ZoneStatus.RETURNING
-            # Снапшот дельты уже зафиксирован в check_departure, здесь ничего не меняем
             logger.info(f"🔄 [{self.symbol}] ZONE {self.id} RETURNING: price={current_price:.2f}, wall={self.high_price:.2f}, corridor={return_tolerance:.4f}, touch_time={self.wall_touch_time}")
             return True
 
