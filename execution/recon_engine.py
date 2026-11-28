@@ -259,13 +259,13 @@ class ReconciliationEngine:
         logger.info(f"🛰️ [RECON] [{passport.passport_id}] Финализирован → CLOSED ({reason})")
 
     async def _reprotect(self, passport: TradePassport, mgr, reason: str):
-        """Безопасное восстановление защитных ордеров с проверкой наличия позиции."""
+        """Безопасное восстановление защитных ордеров с обновлением passport.orders."""
         if not self.om:
             mgr.log_recon("REPROTECT_SKIPPED", "OrderManager недоступен")
             return
             
         if getattr(passport, 'is_closing', False):
-            logger.debug(f"️ Skipping reprotect for {passport.passport_id}: Flag is_closing=True.")
+            logger.debug(f"⏭️ Skipping reprotect for {passport.passport_id}: Flag is_closing=True.")
             return
 
         try:
@@ -282,10 +282,8 @@ class ReconciliationEngine:
             success = await self.om.place_protective_orders(passport)
             
             if not success:
-                # ✅ ОБРАБОТКА ОШИБКИ ЗАЩИТЫ КАК СОСТОЯНИЕ
                 mgr.log_recon("REPROTECT_FAILED", "Не удалось выставить защитные ордера")
                 
-                # Повторная проверка: позиция еще существует?
                 pos_list_retry = await self.rest.get_positions(self.category, passport.symbol)
                 current_pos_retry = next((p for p in pos_list_retry if p.get("symbol") == passport.symbol), None)
                 retry_size = float(current_pos_retry.get("size", 0)) if current_pos_retry else 0
@@ -296,10 +294,28 @@ class ReconciliationEngine:
                     mgr.set_state("ERROR_STATE", reason="protective_orders_failed", source="RECON")
                     self.storage.save(passport)
                 return
-                
+            
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обновляем passport.orders актуальными ордерами с биржи
+            open_orders = await self.rest.get_open_orders(self.category, passport.symbol)
+            passport.orders = []
+            for o in open_orders:
+                order_type = "LIMIT_TP1" if "tp1" in o.get("orderLinkId", "").lower() or o.get("orderLinkId", "").endswith("_tp1") else \
+                             "LIMIT_TP2" if "tp2" in o.get("orderLinkId", "").lower() or o.get("orderLinkId", "").endswith("_tp2") else \
+                             "STOP_SL" if "sl" in o.get("orderLinkId", "").lower() or o.get("orderLinkId", "").endswith("_sl") else \
+                             "UNKNOWN"
+                passport.orders.append({
+                    "order_id": o.get("orderId"),
+                    "type": order_type,
+                    "status": o.get("orderStatus", "New"),
+                    "price": float(o.get("price", 0)),
+                    "qty": float(o.get("qty", 0)),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                })
+            
             mgr.log_recon("REPROTECTED", "Защитные ордера восстановлены по паспорту")
             self.storage.save(passport)
-            logger.warning(f"🛰️ [RECON] [{passport.passport_id}] Защита восстановлена ({reason})")
+            logger.info(f"🛰️ [RECON] [{passport.passport_id}] Защита восстановлена ({reason}), обновлено {len(passport.orders)} ордеров")
             
         except Exception as e:
             mgr.log_recon("REPROTECT_FAILED", str(e))
