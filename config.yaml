@@ -1,17 +1,17 @@
 # Конфигурация платформы PLATO V2
 # Версия: Golden Bounce & Retest (v3.4 Cluster SL + Aggressive Entry)
-# Обновлено: кластерный SL (боевой режим) + entry_offset_ticks=4 для гарантированного исполнения
+# Обновлено: пороги стен по бэктесту + entry_offset_ticks=6
 
 bybit:
   use_testnet: false
-  use_demo: true  # Включаем демо-счет для безопасного тестирования
+  use_demo: true
 
 trading:
   filters:
     positive_ev:
       safety_margin: 1.2
 
-  symbols: ["SOLUSDT", "BTCUSDT", "AVAXUSDT", "BNBUSDT", "XRPUSDT"]
+  symbols: ["SOLUSDT", "BTCUSDT", "AVAXUSDT", "BNBUSDT", "XRPUSDT", "ETHUSDT", "LINKUSDT"]
   category: "linear"
   exit_logic: "structure"
   
@@ -24,14 +24,12 @@ trading:
     post_tp1_logic: "tp2_protect"
     tp2_protection_buffer_mult: 3.0
   
-  # ✅ ЕДИНАЯ ВАЛЮТА РИСКА: USDT
   risk:
     base_risk_usdt: 30.0
     max_notional_usd: 50000.0
     min_notional_usd: 100.0
     max_daily_loss: 100.0
   
-  # ✅ Swing SL параметры (протестировано с PF 2.07)
   swing_sl:
     enabled: true
     swing_n: 5
@@ -41,7 +39,6 @@ trading:
     tp2_mult: 2.0
     early_be_fraction: 0.5
   
-  # ✅ Кластерный SL (v3.4, боевой режим)
   cluster_search:
     enabled: true
     k_median: 4
@@ -64,13 +61,14 @@ trading:
     hvn_match_tolerance_ticks: 10
     tp_buffer_ticks: 3
 
-  # ✅ Инструмент-специфичные фильтры возврата
   instrument_filters:
     BTCUSDT: { type: return_bars_max, threshold: 6 }
     XRPUSDT: { type: delta_agree, threshold: 50 }
     SOLUSDT: { type: return_bars_max, threshold: 6 }
     BNBUSDT: { type: return_bars_max, threshold: 6 }
     AVAXUSDT: { type: return_bars_max, threshold: 6 }
+    ETHUSDT: { type: return_bars_max, threshold: 6 }
+    LINKUSDT: { type: return_bars_max, threshold: 6 }
   
   orders:
     breakeven_after_tp1: false
@@ -83,7 +81,7 @@ trading:
         min_rr_ratio: 1.0
         risk_slippage_mult: 1.2
         fee_rate: 0.0004
-        entry_offset_ticks: 4  # ✅ БЫЛО 1, СТАЛО 4 — агрессивный вход для гарантированного исполнения
+        entry_offset_ticks: 6  # ✅ Компромисс: было 4, стало 6 (баланс fill%/цены входа)
 
       session_multipliers:
         asian_night: { k_wall: 2.5, k_atr_sl_buffer: 1.0, k_atr_retracement: 1.2, k_delta: 0.8 }
@@ -126,28 +124,36 @@ trading:
         pull_cycle_demerit: 0.5
         max_pull_cycles: 3
 
-# ✅ Настройки под каждый инструмент (в USDT)
+# ✅ Пороги стен по бэктесту (между P90 и P95, с запасом для демо)
 instruments:
   SOLUSDT:
     enabled: true
-    min_wall_value_usd: 150000
-    min_cluster_volume_usd: 20000
+    min_wall_value_usd: 30000    # было 150000 (P90=22699, P95=42293)
+    min_cluster_volume_usd: 15000
   BTCUSDT:
     enabled: true
-    min_wall_value_usd: 150000
+    min_wall_value_usd: 100000   # было 150000 (P90=93404, P95=123753)
     min_cluster_volume_usd: 50000
   XRPUSDT:
     enabled: true
-    min_wall_value_usd: 40000
-    min_cluster_volume_usd: 10000
+    min_wall_value_usd: 10000    # было 40000 (P90=6988, P95=10254)
+    min_cluster_volume_usd: 5000
   BNBUSDT:
     enabled: true
-    min_wall_value_usd: 100000
-    min_cluster_volume_usd: 20000
+    min_wall_value_usd: 3000     # было 100000 (P90=1064, P95=1791)
+    min_cluster_volume_usd: 1500
   AVAXUSDT:
     enabled: true
-    min_wall_value_usd: 70000
-    min_cluster_volume_usd: 10000
+    min_wall_value_usd: 1500     # было 70000 (P90=369, P95=740)
+    min_cluster_volume_usd: 800
+  ETHUSDT:
+    enabled: true
+    min_wall_value_usd: 25000    # НОВЫЙ (P90=17080, P95=24234)
+    min_cluster_volume_usd: 12000
+  LINKUSDT:
+    enabled: true
+    min_wall_value_usd: 1500     # НОВЫЙ (P90=494, P95=997)
+    min_cluster_volume_usd: 800
 
 self_test:
   enabled: false
