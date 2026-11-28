@@ -273,56 +273,50 @@ class GoldenBounceStrategy:
 
     async def _on_orderbook(self, snapshot: Dict[str, Any]):
         try:
-            # ✅ РАЗЛИЧАЕМ snapshot и delta от Bybit WebSocket
+            # ✅ ИСПРАВЛЕНИЕ: используем только snapshot, игнорируем delta
+            # Delta содержит только измененные уровни (1-2 штуки),
+            # и при замене ломает полный стакан.
             msg_type = snapshot.get("type", "delta")
             
-            if msg_type == "snapshot":
-                # Полный снапшот — сохраняем целиком
-                self._latest_ob_snapshot = snapshot
-            else:
-                # Дельта-обновление — обновляем уровни в существующем снапшоте
-                if self._latest_ob_snapshot is None:
-                    self._latest_ob_snapshot = snapshot
-                else:
-                    # Bybit в дельте присылает ПОЛНЫЙ срез измененной стороны,
-                    # поэтому просто заменяем ключи a/b
-                    data = snapshot.get("data", {})
-                    existing_data = self._latest_ob_snapshot.get("data", {})
-                    
-                    if "a" in data:
-                        existing_data["a"] = data["a"]
-                    if "b" in data:
-                        existing_data["b"] = data["b"]
+            if msg_type != "snapshot":
+                return  # Игнорируем дельты
+            
+            # Сохраняем полный снапшот
+            self._latest_ob_snapshot = snapshot
             
             now = datetime.now(timezone.utc)
-            data = self._latest_ob_snapshot.get("data", {})
+            data = snapshot.get("data", {})
             bids = data.get("b", [])
             asks = data.get("a", [])
 
             current_price = None
-            if bids and asks: current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
-            elif bids: current_price = float(bids[0][0])
-            elif asks: current_price = float(asks[0][0])
+            if bids and asks: 
+                current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
+            elif bids: 
+                current_price = float(bids[0][0])
+            elif asks: 
+                current_price = float(asks[0][0])
 
-            if current_price is not None: await self._check_zones_departure(current_price, now)
+            if current_price is not None: 
+                await self._check_zones_departure(current_price, now)
 
             instr_cfg = self.config.get("instruments", {}).get(self.symbol, {})
-            base_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
-            session_mult = self._get_session_multipliers()
-            k_wall = session_mult.get("k_wall", 2.0)
-            min_wall_usd = base_wall_usd / k_wall  # ✅ Сессионная подстройка: ночь → порог ниже
+            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
 
             if bids:
                 best_bid_price, best_bid_vol = float(bids[0][0]), float(bids[0][1])
                 if best_bid_price * best_bid_vol >= min_wall_usd:
                     event = await self.wall_tracker.update_ob(self.symbol, best_bid_price, best_bid_vol, "bid", now)
-                    if event: await self._handle_wall_event(event)
+                    if event: 
+                        await self._handle_wall_event(event)
             if asks:
                 best_ask_price, best_ask_vol = float(asks[0][0]), float(asks[0][1])
                 if best_ask_price * best_ask_vol >= min_wall_usd:
                     event = await self.wall_tracker.update_ob(self.symbol, best_ask_price, best_ask_vol, "ask", now)
-                    if event: await self._handle_wall_event(event)
-        except Exception as e: logger.error(f"[{self.symbol}] Error in _on_orderbook: {e}", exc_info=True)
+                    if event: 
+                        await self._handle_wall_event(event)
+        except Exception as e: 
+            logger.error(f"[{self.symbol}] Error in _on_orderbook: {e}", exc_info=True)
 
     async def _check_zones_departure(self, current_price: float, now: datetime):
         multipliers = self._get_session_multipliers()
