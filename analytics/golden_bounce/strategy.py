@@ -307,7 +307,10 @@ class GoldenBounceStrategy:
             if current_price is not None: await self._check_zones_departure(current_price, now)
 
             instr_cfg = self.config.get("instruments", {}).get(self.symbol, {})
-            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
+            base_wall_usd = instr_cfg.get("min_wall_value_usd", 50000)
+            session_mult = self._get_session_multipliers()
+            k_wall = session_mult.get("k_wall", 2.0)
+            min_wall_usd = base_wall_usd / k_wall  # ✅ Сессионная подстройка: ночь → порог ниже
 
             if bids:
                 best_bid_price, best_bid_vol = float(bids[0][0]), float(bids[0][1])
@@ -662,7 +665,10 @@ class GoldenBounceStrategy:
             price_f = float(price)
             
             instr_cfg = self.config.get("instruments", {}).get(symbol, {}) if isinstance(self.config, dict) else getattr(self.config, 'get', lambda k, d: {})("instruments", {}).get(symbol, {})
-            min_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) if instr_cfg else 50000
+            base_wall_usd = instr_cfg.get("min_wall_value_usd", 50000) if instr_cfg else 50000
+            session_mult = self._get_session_multipliers()
+            k_wall = session_mult.get("k_wall", 2.0)
+            min_wall_usd = base_wall_usd / k_wall  # ✅ Сессионная подстройка
             
             peak_vol = float(event.get("peak_volume", 0))
             wall_value_usd = price_f * peak_vol
